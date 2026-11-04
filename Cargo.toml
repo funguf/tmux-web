@@ -1,0 +1,45 @@
+[package]
+name = "tmux-web"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Browser panel layout for tmux sessions, with Claude Code badges"
+license = "MIT"
+publish = false
+
+[lib]
+name = "tmux_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tmux-web"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws", "macros"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom = "0.3"
+hex = "0.4"
+libc = "0.2"
+mime_guess = "2"
+nix = { version = "0.30", features = ["user", "signal", "process", "fs", "hostname"] }
+portable-pty = "0.9"
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+strip = true
+lto = "thin"

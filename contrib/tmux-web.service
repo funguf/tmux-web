@@ -1,0 +1,22 @@
+# systemd user unit for tmux-web.
+# Install: cp contrib/tmux-web.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#          systemctl --user enable --now tmux-web
+[Unit]
+Description=tmux-web - browser panels for tmux sessions
+After=default.target
+
+[Service]
+Type=simple
+# Optional KEY=value settings such as TMUX_WEB_LISTEN (default 127.0.0.1:7690),
+# TMUX_WEB_ALLOW_HOSTS; see `tmux-web serve --help`.
+EnvironmentFile=-%h/.config/tmux-web/env
+ExecStart=%h/.local/bin/tmux-web serve
+Restart=on-failure
+RestartSec=2
+# tmux servers started by tmux-web (new session from the UI, crash restore) live in this
+# service's cgroup. KillMode=process keeps them alive when the service stops or restarts.
+KillMode=process
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

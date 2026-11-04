@@ -1,0 +1,1 @@
+{"type":"module","private":true,"scripts":{"test":"node --test --test-concurrency=1 tests/*.test.js"},"devDependencies":{"playwright-core":"1.64.0"}}
