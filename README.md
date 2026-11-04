@@ -3,6 +3,8 @@
 Browser panels for your tmux sessions, served by one Rust binary, with a badge on every session
 that runs Claude Code.
 
+![tmux-web: five tmux sessions as stacked tabs and split panels](docs/screenshot.png)
+
 - **Panels are tmux sessions.** Each panel is a real terminal (xterm.js) attached to a session.
   The tab title is always the tmux session name and follows renames made in tmux.
 - **Docking layout.** Drag a tab to reorder it, onto another group to stack it, or onto an edge
