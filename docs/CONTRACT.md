@@ -486,6 +486,8 @@ Required behaviour:
    renderer: `<div data-testid="tab" data-session=<name>>` with a connection dot, the title
    (exactly the session name), a Claude badge, and a close button. Double-click on a tab toggles
    maximise of its group; middle-click closes the panel. Closing a panel never kills the session.
+   When a group's header is too narrow for all its tabs, they wrap onto more rows (every tab stays
+   visible; the header grows and the terminal shrinks to fit) instead of hiding in an overflow list.
 4. **Group header actions** (right side, `data-testid` = `header-split-right`,
    `header-split-down`, `header-upload`, `header-maximize`): split right / split down open the
    picker in split mode and place the chosen session in a new group right of / below this group;

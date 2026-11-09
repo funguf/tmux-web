@@ -12,6 +12,7 @@ import { createDockview, themeDark } from '../vendor/dockview-core/dockview-core
 import { uid } from './dom.js';
 import { EventHub } from './emitter.js';
 import { HeaderActions } from './header-actions.js';
+import { wrapAllTabs } from './tab-rows.js';
 import { TerminalPanel } from './terminal-panel.js';
 import { TerminalTab } from './terminal-tab.js';
 
@@ -59,6 +60,7 @@ export class Workspace extends EventHub {
     });
 
     this.disposables = [
+      wrapAllTabs(this.api),
       this.api.onDidLayoutChange(() => this.emit('change')),
       this.api.onDidMaximizedGroupChange(() => this.emit('change')),
       this.api.onDidAddPanel((panel) => {
