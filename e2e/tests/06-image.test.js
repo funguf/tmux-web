@@ -1,5 +1,5 @@
 /**
- * Requirement 7: image paste. A pasted PNG lands in `<state-dir>/uploads/` and its path
+ * Requirement 7: image and file paste. A pasted PNG lands in `<state-dir>/uploads/` and its path
  * appears at the shell prompt; the same for a dropped file (and the header upload button).
  */
 import assert from 'node:assert/strict';
@@ -74,7 +74,7 @@ describe('image paste and drop', () => {
     await ui.waitForScreen(page, panel.id, (line) => line === `$ ${file} `, { what: `the prompt to show ${file} followed by a space` });
     const lines = await ui.screenLines(page, panel.id);
     assert.ok(!lines.some((line) => /not found|denied|No such/i.test(line)), `the path was not run: ${JSON.stringify(lines.filter(Boolean))}`);
-    await waitFor('the toast', async () => (await ui.toasts(page)).some((text) => /Uploaded 1 image/.test(text)));
+    await waitFor('the toast', async () => (await ui.toasts(page)).some((text) => /Uploaded 1 file/.test(text)));
     // tmux has the same text on its prompt line (it reached the shell).
     await waitFor('tmux to show the path on the prompt', () => env.tmux.capture(`=${session}:`).split('\n').some((line) => line.trimEnd() === `$ ${file}`));
 
@@ -124,23 +124,23 @@ describe('image paste and drop', () => {
     assert.match(path.basename(file), UPLOAD_NAME);
     assert.ok(png.equals(fs.readFileSync(file)), 'the stored file is byte for byte the dropped PNG');
     await ui.waitForScreen(page, panel.id, (line) => line === `$ ${file} `, { what: `the prompt to show ${file} followed by a space` });
-    await waitFor('the toast', async () => (await ui.toasts(page)).some((text) => /Uploaded 1 image/.test(text)));
+    await waitFor('the toast', async () => (await ui.toasts(page)).some((text) => /Uploaded 1 file/.test(text)));
     assert.deepEqual(page.__errors, []);
   });
 
-  it('dropping a file that is not an image is refused', TEST, async () => {
+  it('dropping a file that is not an image uploads it under its sanitised name and pastes the path', TEST, async () => {
     const { env } = ctx;
-    const { page, panel, session } = await openTerminal();
+    const { page, panel } = await openTerminal();
     const before = env.uploads().length;
-    await page.evaluate((id) => {
-      const transfer = new DataTransfer();
-      transfer.items.add(new File(['just text'], 'notes.txt', { type: 'text/plain' }));
-      const host = document.querySelector(`[data-testid="terminal-panel"][data-panel-id="${id}"] .xterm-screen`);
-      for (const type of ['dragenter', 'dragover', 'drop']) host.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer }));
-    }, panel.id);
-    await waitFor('a warning toast', async () => (await ui.toasts(page)).some((text) => /only image/i.test(text)));
-    assert.equal(env.uploads().length, before, 'nothing was uploaded');
-    assert.ok((await ui.screenLines(page, panel.id)).every((line) => !line.includes('notes.txt')), 'nothing was pasted');
+    await dropFiles(page, panel.id, [{ name: 'notes v2.txt', type: 'text/plain', bytes: [...Buffer.from('hello file')] }]);
+    const file = (await uploadedPaths(before + 1)).find((candidate) => path.basename(candidate).endsWith('-notes_v2.txt'));
+    assert.match(path.basename(file ?? ''), /^file-\d+-[0-9a-f]{8}-notes_v2\.txt$/);
+    assert.equal(path.dirname(file), env.uploadsDir);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'hello file');
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'uploads are private');
+    await ui.waitForScreen(page, panel.id, (line) => line === `$ ${file} `, { what: `the prompt to show ${file} followed by a space` });
+    await waitFor('the toast', async () => (await ui.toasts(page)).some((text) => /Uploaded 1 file/.test(text)));
+    assert.deepEqual(page.__errors, []);
   });
 
   it('dropped JPEG, GIF and WebP files keep their type, and their paths come in the order dropped', TEST, async () => {
@@ -172,18 +172,18 @@ describe('image paste and drop', () => {
     assert.deepEqual(page.__errors, []);
   });
 
-  it('a file that only claims to be an image is refused by the server and nothing is pasted', TEST, async () => {
+  it('a file that only claims to be an image is stored as a plain file under its name', TEST, async () => {
     const { env } = ctx;
     const { page, panel } = await openTerminal();
     const before = env.uploads().length;
     await dropFiles(page, panel.id, [{ name: 'evil.png', type: 'image/png', bytes: [...Buffer.from('this is not a png, it is a shell script')] }]);
-    await waitFor('the failure toast', async () => (await ui.toasts(page)).some((text) => /Upload failed.*evil\.png/.test(text)));
-    assert.equal(env.uploads().length, before, 'nothing was stored');
-    assert.ok((await ui.screenLines(page, panel.id)).every((line) => !line.includes('/uploads/')), 'nothing was pasted');
+    const file = (await uploadedPaths(before + 1)).find((candidate) => path.basename(candidate).endsWith('-evil.png'));
+    assert.match(path.basename(file ?? ''), /^file-\d+-[0-9a-f]{8}-evil\.png$/, 'not an img- upload: the magic bytes decide');
+    await ui.waitForScreen(page, panel.id, (line) => line === `$ ${file} `, { what: `the prompt to show ${file}` });
     assert.deepEqual(page.__errors, []);
   });
 
-  it('the context menu offers Upload image… with the same effect', TEST, async () => {
+  it('the context menu offers Upload file… with the same effect', TEST, async () => {
     const { env } = ctx;
     const { page, panel } = await openTerminal();
     const before = env.uploads().length;

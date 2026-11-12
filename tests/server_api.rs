@@ -1214,7 +1214,7 @@ async fn an_uploaded_image_round_trips_to_a_private_file() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn bad_uploads_are_400_413_and_415() {
+async fn bad_uploads_are_400_and_413_and_any_file_is_accepted() {
     let tmux = Tmux::new();
     let sandbox = Sandbox::new();
     let server = TestServer::start(&tmux, &sandbox, &["--max-upload-mb", "1"]).await;
@@ -1235,17 +1235,27 @@ async fn bad_uploads_are_400_413_and_415() {
     let empty = upload(Vec::new(), "image/png").await;
     assert_eq!((empty.status, empty.error_code().as_str()), (400, "empty"));
 
-    let text = upload(b"definitely not an image".to_vec(), "image/png").await;
+    let text = server
+        .http(
+            "POST",
+            "/api/upload?name=notes.txt",
+            &[("X-Tmux-Web", "1"), ("Content-Type", "image/png")],
+            b"definitely not an image",
+        )
+        .await;
+    assert_eq!(text.status, 201);
+    let text_path = text.json()["path"].as_str().unwrap().to_string();
+    assert!(text_path.ends_with("-notes.txt"), "{text_path}");
     assert_eq!(
-        (text.status, text.error_code().as_str()),
-        (415, "unsupported_type")
+        std::fs::read(&text_path).unwrap(),
+        b"definitely not an image"
     );
     let svg = upload(
         b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec(),
         "image/svg+xml",
     )
     .await;
-    assert_eq!(svg.status, 415);
+    assert_eq!(svg.status, 201);
 
     let mut too_big = PNG.to_vec();
     too_big.resize(2 * 1024 * 1024, 7);
@@ -1263,7 +1273,10 @@ async fn bad_uploads_are_400_413_and_415() {
     let stored = std::fs::read_dir(sandbox.state_dir().join("uploads"))
         .expect("uploads dir")
         .count();
-    assert_eq!(stored, 1, "refused uploads leave nothing behind");
+    assert_eq!(
+        stored, 3,
+        "refused uploads leave nothing behind (text, svg and the exact-limit PNG are kept)"
+    );
 }
 
 // ---- layout ---------------------------------------------------------------------------------------------------

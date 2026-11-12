@@ -22,24 +22,6 @@ export class ApiError extends Error {
   }
 }
 
-/** Best-effort image content type from a file name (used when the browser reports none). */
-function guessImageType(name) {
-  const ext = /\.([a-z0-9]+)$/i.exec(name ?? '')?.[1]?.toLowerCase();
-  switch (ext) {
-    case 'png':
-      return 'image/png';
-    case 'jpg':
-    case 'jpeg':
-      return 'image/jpeg';
-    case 'gif':
-      return 'image/gif';
-    case 'webp':
-      return 'image/webp';
-    default:
-      return 'application/octet-stream';
-  }
-}
-
 export class Api {
   /** @param {string} [baseUrl] defaults to the current document URL */
   constructor(baseUrl = document.baseURI) {
@@ -139,11 +121,12 @@ export class Api {
     return this.request('PUT', 'api/layout', { json: { layout, client_id: clientId }, keepalive });
   }
 
-  /** Upload one image; resolves to {path, bytes, mime}. */
+  /** Upload one file; resolves to {path, bytes, mime}. */
   upload(file) {
-    return this.request('POST', 'api/upload', {
+    const query = file.name ? `?name=${encodeURIComponent(file.name)}` : '';
+    return this.request('POST', `api/upload${query}`, {
       body: file,
-      headers: { 'Content-Type': file.type || guessImageType(file.name) },
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
     });
   }
 

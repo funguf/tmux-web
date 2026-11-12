@@ -105,7 +105,7 @@ export class Env {
     try {
       return fs
         .readdirSync(this.uploadsDir)
-        .filter((name) => /^img-\d+-[0-9a-f]{8}\.(png|jpg|gif|webp)$/.test(name))
+        .filter((name) => /^(img-\d+-[0-9a-f]{8}\.(png|jpg|gif|webp)|file-\d+-[0-9a-f]{8}-[A-Za-z0-9._-]+)$/.test(name))
         .sort();
     } catch {
       return [];

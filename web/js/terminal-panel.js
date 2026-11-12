@@ -1,6 +1,6 @@
 /**
  * Dockview content renderer for one tmux session: an xterm.js terminal wired to
- * /ws/attach, with copy/paste, image upload, links, a context menu and a
+ * /ws/attach, with copy/paste, file upload, links, a context menu and a
  * not-connected overlay (CONTRACT §8.6 items 5-13).
  *
  * Lifecycle notes
@@ -22,7 +22,7 @@ import { AttachConnection, RECOVERABLE_REASONS } from './attach-connection.js';
 import { canReadClipboard, copyText, osc52Provider, readClipboardText } from './clipboard.js';
 import { debounce, el, errorMessage } from './dom.js';
 import { EventHub } from './emitter.js';
-import { dragHasFiles, imagesFromClipboard, pickImages, uploadImages } from './image-upload.js';
+import { dragHasFiles, filesFromClipboard, pickFiles, uploadFiles } from './file-upload.js';
 import { PanelOverlay } from './panel-overlay.js';
 import { createKeyHandler } from './terminal-keys.js';
 import { createLinkHandlers } from './terminal-links.js';
@@ -222,17 +222,17 @@ export class TerminalPanel {
     return lines.join('\n');
   }
 
-  /** Upload image files and paste their server paths into the terminal. */
+  /** Upload files and paste their server paths into the terminal. */
   async uploadFiles(files) {
-    const paths = await uploadImages(this.services.api, files);
+    const paths = await uploadFiles(this.services.api, files);
     if (paths.length === 0 || this.disposed || !this.term) return;
     this.term.paste(`${paths.join(' ')} `);
-    if (!this.connected) toast.warn(`Not connected; the image path is ${paths.join(' ')}`);
+    if (!this.connected) toast.warn(`Not connected; the file path is ${paths.join(' ')}`);
   }
 
   /** Open the file chooser and upload what the user picks. */
-  async chooseAndUploadImages() {
-    const files = await pickImages();
+  async chooseAndUploadFiles() {
+    const files = await pickFiles();
     if (files.length > 0) await this.uploadFiles(files);
     this.term?.focus();
   }
@@ -517,11 +517,11 @@ export class TerminalPanel {
     listen('pointerdown', activate, true);
     listen('focusin', activate);
 
-    // Image paste: capture phase, so xterm's own paste handler never sees image pastes.
+    // File paste: capture phase, so xterm's own paste handler never sees file pastes.
     listen(
       'paste',
       (event) => {
-        const files = imagesFromClipboard(event.clipboardData);
+        const files = filesFromClipboard(event.clipboardData);
         if (files.length === 0) return;
         event.preventDefault();
         event.stopPropagation();
@@ -530,7 +530,7 @@ export class TerminalPanel {
       true,
     );
 
-    // Image drop: only OS file drags, so dockview's tab drag and drop is untouched.
+    // File drop: only OS file drags, so dockview's tab drag and drop is untouched.
     let dragDepth = 0;
     const setDropActive = (active) => root.classList.toggle('drop-active', active);
     listen(
@@ -622,7 +622,7 @@ export class TerminalPanel {
           onSelect: () => this.copySelection(),
         },
         { label: 'Paste', action: 'paste', icon: 'paste', shortcut: 'Ctrl+V', onSelect: () => void this.pasteFromClipboard() },
-        { label: 'Upload image…', action: 'upload', icon: 'upload', onSelect: () => void this.chooseAndUploadImages() },
+        { label: 'Upload file…', action: 'upload', icon: 'upload', onSelect: () => void this.chooseAndUploadFiles() },
         { separator: true },
         {
           label: 'Split right',

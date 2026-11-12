@@ -1,10 +1,10 @@
 /**
  * Group header actions (right side of every group's tab strip):
- * split right, split down, upload image, maximise / restore.
+ * split right, split down, upload file, maximise / restore.
  * Test ids: header-split-right, header-split-down, header-upload, header-maximize.
  */
 import { el, iconButton, setButtonIcon } from './dom.js';
-import { pickImages } from './image-upload.js';
+import { pickFiles } from './file-upload.js';
 import { toast } from './toast.js';
 
 export class HeaderActions {
@@ -33,7 +33,7 @@ export class HeaderActions {
     });
     this.upload = iconButton({
       icon: 'upload',
-      title: 'Upload image(s) and paste the path into this panel',
+      title: 'Upload file(s) and paste the path into this panel',
       testid: 'header-upload',
       className: 'header-btn',
       onClick: () => void this.#upload(),
@@ -100,7 +100,7 @@ export class HeaderActions {
       toast.info('Open a session in this group first');
       return;
     }
-    const files = await pickImages();
+    const files = await pickFiles();
     if (files.length > 0) await terminal.uploadFiles(files);
     terminal.focus();
   }

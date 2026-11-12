@@ -602,23 +602,34 @@ async fn put_layout(State(app): State<AppState>, request: Request) -> ApiResult<
     ))
 }
 
+/// Longest accepted `name` query value of an upload, in bytes.
+const MAX_UPLOAD_NAME_PARAM: usize = 1024;
+
 async fn upload(State(app): State<AppState>, request: Request) -> ApiResult<Response> {
     let limit = usize::try_from(app.config.max_upload_bytes).unwrap_or(usize::MAX);
     let (parts, body) = request.into_parts();
+    let name = Query::<Vec<(String, String)>>::try_from_uri(&parts.uri)
+        .ok()
+        .and_then(|Query(params)| params.into_iter().find(|(key, _)| key == "name"))
+        .map(|(_, mut value)| {
+            if value.len() > MAX_UPLOAD_NAME_PARAM {
+                let mut end = MAX_UPLOAD_NAME_PARAM;
+                while !value.is_char_boundary(end) {
+                    end -= 1;
+                }
+                value.truncate(end);
+            }
+            value
+        });
     let bytes = read_body(&parts.headers, body, limit).await?;
     let store = Arc::clone(&app.uploads);
-    let saved = blocking(move || store.save(&bytes))
+    let saved = blocking(move || store.save(&bytes, name.as_deref()))
         .await?
         .map_err(|err| match err {
             UploadError::Empty => {
                 ApiError::new(StatusCode::BAD_REQUEST, "empty", "the upload is empty")
             }
             UploadError::TooLarge { .. } => ApiError::too_large(limit),
-            UploadError::UnsupportedType => ApiError::new(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "unsupported_type",
-                "only PNG, JPEG, GIF and WebP images are accepted",
-            ),
             UploadError::Io(err) => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "io_error",
@@ -1606,7 +1617,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_errors_are_400_413_and_415() {
+    async fn upload_errors_are_400_and_413_and_any_file_is_accepted() {
         let h = harness_with(FakeTmux::with_sessions(&[]), &["--max-upload-mb", "1"]);
         let upload = |body: Vec<u8>, content_type: &'static str| {
             let h = &h;
@@ -1626,13 +1637,7 @@ mod tests {
             (reply.status, error_code(&reply).as_str()),
             (StatusCode::BAD_REQUEST, "empty")
         );
-        // The declared type is only a hint: text labelled as PNG is still refused…
-        let reply = upload(b"plain text".to_vec(), "image/png").await;
-        assert_eq!(
-            (reply.status, error_code(&reply).as_str()),
-            (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_type")
-        );
-        // …and a PNG labelled as text is accepted.
+        // The declared type is only a hint: a PNG labelled as text is still an image.
         let reply = upload(PNG.to_vec(), "text/plain").await;
         assert_eq!(reply.status, StatusCode::CREATED);
         let mut big = PNG.to_vec();
@@ -1645,6 +1650,47 @@ mod tests {
         let mut exact = PNG.to_vec();
         exact.resize(1024 * 1024, 0);
         assert_eq!(upload(exact, "image/png").await.status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn a_non_image_is_stored_under_its_name() {
+        let h = harness();
+        let post = |uri: &'static str, body: &[u8]| {
+            let h = &h;
+            let body = body.to_vec();
+            async move {
+                send(
+                    h,
+                    Method::POST,
+                    uri,
+                    &[("x-tmux-web", "1"), ("content-type", "text/plain")],
+                    body,
+                )
+                .await
+            }
+        };
+        let reply = post("/api/upload?name=notes.txt", b"hello file").await;
+        assert_eq!(reply.status, StatusCode::CREATED);
+        let body = reply.json();
+        assert_eq!(body["mime"], "application/octet-stream");
+        let path = body["path"].as_str().unwrap();
+        assert!(path.ends_with("-notes.txt"), "{path}");
+        assert_eq!(std::fs::read(path).unwrap(), b"hello file");
+        // Percent-decoding and sanitising: a traversal attempt keeps only the last part.
+        let reply = post("/api/upload?name=..%2F..%2Fmy%20file.txt", b"x").await;
+        assert_eq!(reply.status, StatusCode::CREATED);
+        assert!(
+            reply.json()["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("-my_file.txt"),
+            "{:?}",
+            reply.json()
+        );
+        // An SVG is just a file.
+        let reply = post("/api/upload", b"<svg xmlns='http://www.w3.org/2000/svg'/>").await;
+        assert_eq!(reply.status, StatusCode::CREATED);
+        assert!(reply.json()["path"].as_str().unwrap().ends_with("-upload"));
     }
 
     // ---- removed endpoints ---------------------------------------------------------------------

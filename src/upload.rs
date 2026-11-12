@@ -1,8 +1,10 @@
-//! Image upload handling (owned by the server unit).
+//! File upload handling (owned by the server unit).
 //!
-//! The type of an upload is decided by its magic bytes alone; the declared Content-Type is
-//! only a hint and is never consulted. Files land in `<state-dir>/uploads/` (mode 0700) as
-//! `img-<unixms>-<8 hex>.<ext>` with mode 0600 and are swept after the retention period.
+//! Any file is accepted. Images (PNG, JPEG, GIF, WebP) are recognised by their magic bytes
+//! alone; the declared Content-Type is never consulted. Files land in `<state-dir>/uploads/`
+//! (mode 0700) with mode 0600 and are swept after the retention period. Images are named
+//! `img-<unixms>-<8 hex>.<ext>`; everything else keeps a sanitised form of the client's file
+//! name: `file-<unixms>-<8 hex>-<safe name>` (see [`safe_file_name`]).
 
 use crate::util;
 use serde::Serialize;
@@ -64,8 +66,6 @@ pub enum UploadError {
     Empty,
     #[error("the upload is larger than {max} bytes")]
     TooLarge { max: u64 },
-    #[error("only PNG, JPEG, GIF and WebP images are accepted")]
-    UnsupportedType,
     #[error("could not store the upload: {0}")]
     Io(#[from] io::Error),
 }
@@ -104,8 +104,9 @@ impl UploadStore {
         self.max_bytes
     }
 
-    /// Validates and stores `bytes`.
-    pub fn save(&self, bytes: &[u8]) -> Result<UploadResult, UploadError> {
+    /// Validates and stores `bytes`. `name` is the client's file name; it is only used (after
+    /// sanitising) for non-image content.
+    pub fn save(&self, bytes: &[u8], name: Option<&str>) -> Result<UploadResult, UploadError> {
         if bytes.is_empty() {
             return Err(UploadError::Empty);
         }
@@ -114,21 +115,34 @@ impl UploadStore {
                 max: self.max_bytes,
             });
         }
-        let kind = detect(bytes).ok_or(UploadError::UnsupportedType)?;
         // The directory could have been removed since startup.
         util::ensure_private_dir(&self.dir)?;
-        let name = format!(
-            "img-{}-{}.{}",
-            util::now_ms(),
-            util::random_hex(4),
-            kind.extension()
-        );
-        let path = self.dir.join(name);
+        let (file_name, mime) = match detect(bytes) {
+            Some(kind) => (
+                format!(
+                    "img-{}-{}.{}",
+                    util::now_ms(),
+                    util::random_hex(4),
+                    kind.extension()
+                ),
+                kind.mime(),
+            ),
+            None => (
+                format!(
+                    "file-{}-{}-{}",
+                    util::now_ms(),
+                    util::random_hex(4),
+                    safe_file_name(name.unwrap_or(""))
+                ),
+                "application/octet-stream",
+            ),
+        };
+        let path = self.dir.join(file_name);
         util::atomic_write(&path, bytes, 0o600)?;
         Ok(UploadResult {
             path: path.to_string_lossy().into_owned(),
             bytes: bytes.len(),
-            mime: kind.mime().to_string(),
+            mime: mime.to_string(),
         })
     }
 
@@ -138,8 +152,49 @@ impl UploadStore {
     }
 }
 
-/// True for names this module could have generated: `img-<digits>-<8 hex>.<ext>`.
+/// Longest sanitised file name, in bytes.
+const MAX_SAFE_NAME: usize = 100;
+
+/// Reduces a client-supplied file name to a safe one: the part after the last `/` or `\\`,
+/// only `[A-Za-z0-9._-]` (every other char becomes `_`), no leading `.` or `-`, at most 100
+/// bytes (the extension is kept when there is one), and `upload` when nothing is left.
+pub(crate) fn safe_file_name(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut name = cleaned.trim_start_matches(['.', '-']).to_string();
+    if name.len() > MAX_SAFE_NAME {
+        // Everything is ASCII here, so byte indexing is on char boundaries.
+        let extension = name
+            .rfind('.')
+            .filter(|&dot| dot > 0)
+            .map(|dot| &name[dot + 1..])
+            .filter(|ext| (1..=16).contains(&ext.len()));
+        name = match extension {
+            Some(ext) => format!("{}.{}", &name[..MAX_SAFE_NAME - ext.len() - 1], ext),
+            None => name[..MAX_SAFE_NAME].to_string(),
+        };
+    }
+    if name.is_empty() {
+        name.push_str("upload");
+    }
+    name
+}
+
+/// True for names this module could have generated: `img-<digits>-<8 hex>.<ext>` or
+/// `file-<digits>-<8 hex>-<safe name>`.
 fn is_upload_name(name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix("file-") {
+        return is_file_upload_rest(rest);
+    }
     let Some(rest) = name.strip_prefix("img-") else {
         return false;
     };
@@ -156,6 +211,24 @@ fn is_upload_name(name: &str) -> bool {
         && millis.bytes().all(|b| b.is_ascii_digit())
         && random.len() == 8
         && random.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `<digits>-<8 hex>-<safe name>` (the part of a `file-` name after the prefix).
+fn is_file_upload_rest(rest: &str) -> bool {
+    let mut parts = rest.splitn(3, '-');
+    let (Some(millis), Some(random), Some(safe)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    !millis.is_empty()
+        && millis.bytes().all(|b| b.is_ascii_digit())
+        && random.len() == 8
+        && random.bytes().all(|b| b.is_ascii_hexdigit())
+        && !safe.is_empty()
+        && safe.len() <= MAX_SAFE_NAME
+        && safe
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// Removes regular files named like uploads whose modification time is more than `retention`
@@ -218,7 +291,7 @@ mod tests {
             (GIF89, "gif", "image/gif"),
             (WEBP, "webp", "image/webp"),
         ] {
-            let result = store.save(bytes).unwrap();
+            let result = store.save(bytes, None).unwrap();
             assert_eq!(result.mime, mime);
             assert_eq!(result.bytes, bytes.len());
             assert!(
@@ -249,30 +322,74 @@ mod tests {
     }
 
     #[test]
-    fn the_declared_type_is_never_consulted() {
-        // `save` has no content-type parameter by construction; this documents that a text
-        // payload is refused no matter what a client claims.
+    fn a_non_image_is_stored_under_its_safe_name() {
         let (_dir, store) = store(1 << 20);
-        assert!(matches!(
-            store.save(b"not an image at all"),
-            Err(UploadError::UnsupportedType)
-        ));
+        let result = store.save(b"hello file", Some("notes.txt")).unwrap();
+        assert_eq!(result.mime, "application/octet-stream");
+        assert_eq!(result.bytes, 10);
+        let path = Path::new(&result.path);
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("file-") && name.ends_with("-notes.txt"),
+            "{name}"
+        );
+        assert!(is_upload_name(name), "{name}");
+        assert_eq!(fs::read(path).unwrap(), b"hello file");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // No name at all falls back to "upload"; an image ignores the name.
+        let nameless = store.save(b"x", None).unwrap();
+        assert!(nameless.path.ends_with("-upload"), "{}", nameless.path);
+        let image = store.save(PNG, Some("evil.txt")).unwrap();
+        assert_eq!(image.mime, "image/png");
+        assert!(image.path.ends_with(".png"), "{}", image.path);
+    }
+
+    #[test]
+    fn safe_file_names_are_sanitised() {
+        for (raw, expected) in [
+            ("../../etc/passwd", "passwd"),
+            ("my report (final).pdf", "my_report__final_.pdf"),
+            (".bashrc", "bashrc"),
+            ("", "upload"),
+            ("a/b\\c.txt", "c.txt"),
+            ("résumé.pdf", "r_sum_.pdf"),
+            ("--x", "x"),
+            ("dir/", "upload"),
+        ] {
+            assert_eq!(safe_file_name(raw), expected, "{raw:?}");
+        }
+        let long = format!("{}.tar.gz", "a".repeat(300));
+        let safe = safe_file_name(&long);
+        assert!(safe.len() <= 100 && safe.ends_with(".gz"), "{safe}");
+        let no_ext = safe_file_name(&"b".repeat(300));
+        assert_eq!(no_ext.len(), 100);
+        for raw in ["\u{1F600}\u{1F600}", "...", "-", "a b\tc", &long] {
+            let safe = safe_file_name(raw);
+            assert!(!safe.is_empty() && safe.len() <= 100, "{safe}");
+            assert!(safe
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')));
+            assert!(!safe.starts_with(['.', '-']), "{safe}");
+        }
     }
 
     #[test]
     fn empty_and_oversize_uploads_are_refused() {
         let (_dir, store) = store(16);
-        assert!(matches!(store.save(b""), Err(UploadError::Empty)));
+        assert!(matches!(store.save(b"", None), Err(UploadError::Empty)));
         let mut big = PNG.to_vec();
         big.resize(17, 0);
         assert!(matches!(
-            store.save(&big),
+            store.save(&big, None),
             Err(UploadError::TooLarge { max: 16 })
         ));
         // Exactly at the limit is accepted.
         let mut exact = PNG.to_vec();
         exact.resize(16, 0);
-        assert_eq!(store.save(&exact).unwrap().bytes, 16);
+        assert_eq!(store.save(&exact, None).unwrap().bytes, 16);
         // Nothing was written for the refused ones.
         assert_eq!(fs::read_dir(store.dir()).unwrap().count(), 1);
     }
@@ -281,7 +398,7 @@ mod tests {
     fn size_is_checked_before_the_type() {
         let (_dir, store) = store(4);
         assert!(matches!(
-            store.save(b"this is not an image and too long"),
+            store.save(b"this is not an image and too long", None),
             Err(UploadError::TooLarge { .. })
         ));
     }
@@ -290,7 +407,7 @@ mod tests {
     fn files_are_private_and_named_img_ms_hex_ext() {
         let (_dir, store) = store(1 << 20);
         let before = util::now_ms();
-        let result = store.save(PNG).unwrap();
+        let result = store.save(PNG, None).unwrap();
         let after = util::now_ms();
         let path = Path::new(&result.path);
         assert!(path.is_absolute(), "{}", result.path);
@@ -312,8 +429,9 @@ mod tests {
     #[test]
     fn names_are_unique_even_within_one_millisecond() {
         let (_dir, store) = store(1 << 20);
-        let paths: std::collections::HashSet<_> =
-            (0..50).map(|_| store.save(PNG).unwrap().path).collect();
+        let paths: std::collections::HashSet<_> = (0..50)
+            .map(|_| store.save(PNG, None).unwrap().path)
+            .collect();
         assert_eq!(paths.len(), 50);
     }
 
@@ -334,6 +452,52 @@ mod tests {
         ] {
             assert!(!is_upload_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn file_upload_names_are_recognised_strictly() {
+        assert!(is_upload_name("file-1793122138000-0a1b2c3d-notes.txt"));
+        assert!(is_upload_name("file-1-ABCDEF01-a-b-c"));
+        for bad in [
+            "file-12-zzzzzzzz-x",
+            "file-12-0123abcd-",
+            "file-12-0123abcd-a b",
+            "file-12-0123abc-x",
+            "file--0123abcd-x",
+            "file-12-0123abcd",
+            "file-1x-0123abcd-x",
+        ] {
+            assert!(!is_upload_name(bad), "{bad}");
+        }
+        assert!(!is_upload_name(&format!(
+            "file-1-0123abcd-{}",
+            "a".repeat(101)
+        )));
+    }
+
+    #[test]
+    fn sweep_removes_expired_file_uploads() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("file-1-00000000-notes.txt");
+        let other = dir.path().join("notes.txt");
+        fs::write(&old, b"x").unwrap();
+        fs::write(&other, b"keep").unwrap();
+        let now = SystemTime::now();
+        let long_ago = now - Duration::from_secs(10 * 86_400);
+        for path in [&old, &other] {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        assert_eq!(
+            sweep_dir(dir.path(), Duration::from_secs(7 * 86_400), now).unwrap(),
+            1
+        );
+        assert!(!old.exists());
+        assert!(other.exists());
     }
 
     #[test]
@@ -395,8 +559,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store =
             UploadStore::open(&dir.path().join("u"), 1 << 20, Duration::from_secs(60)).unwrap();
-        let kept = store.save(PNG).unwrap().path;
-        let old = store.save(PNG).unwrap().path;
+        let kept = store.save(PNG, None).unwrap().path;
+        let old = store.save(PNG, None).unwrap().path;
         let long_ago = SystemTime::now() - Duration::from_secs(3600);
         fs::File::options()
             .write(true)
@@ -413,7 +577,7 @@ mod tests {
     fn save_recreates_a_removed_directory() {
         let (_dir, store) = store(1 << 20);
         fs::remove_dir_all(store.dir()).unwrap();
-        let result = store.save(PNG).unwrap();
+        let result = store.save(PNG, None).unwrap();
         assert!(Path::new(&result.path).exists());
     }
 }

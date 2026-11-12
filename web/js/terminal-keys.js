@@ -4,7 +4,7 @@
  * xterm calls the handler for every key event; returning false stops xterm from
  * processing the key. For paste shortcuts the handler returns false WITHOUT calling
  * preventDefault, so the browser still fires a native `paste` event that xterm handles
- * (bracketed paste) and the panel can intercept for images.
+ * (bracketed paste) and the panel can intercept for files.
  */
 import { isMac } from './dom.js';
 

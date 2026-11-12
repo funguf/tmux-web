@@ -12,8 +12,8 @@ that runs Claude Code.
   the window (header button, double-click a tab, or Ctrl+Shift+Enter) and restore it the same way.
 - **The layout lives on the server.** Close Chrome, restart tmux-web, come back: same panels,
   same splits, same maximised group.
-- **Paste images.** Paste (Ctrl+V), drop, or pick an image: it is uploaded to the server and its
-  path is pasted into the terminal. Claude Code turns the pasted path into `[Image #1]`.
+- **Paste files.** Paste (Ctrl+V), drop, or pick any file: it is uploaded to the server and its
+  path is pasted into the terminal. For images, Claude Code turns the pasted path into `[Image #1]`.
 - **Copy text.** Selecting copies (on by default), plus Ctrl+Shift+C, Ctrl+C while text is
   selected, and the right-click menu. tmux copy mode also reaches your clipboard (OSC 52).
 - **Finger scrolling.** On a touch screen a vertical swipe on a panel scrolls the tmux history
@@ -71,7 +71,7 @@ UI, a page opened while tmux is down) survive a restart of the service. It reads
 | Action | How |
 |---|---|
 | Copy | select text (copy-on-select), Ctrl+Shift+C, Ctrl+Insert, or Ctrl+C while text is selected |
-| Paste text or an image | Ctrl+V, Ctrl+Shift+V, Shift+Insert (Cmd+V on macOS), or drop a file |
+| Paste text, an image or a file | Ctrl+V, Ctrl+Shift+V, Shift+Insert (Cmd+V on macOS), or drop a file |
 | Open a link | Ctrl+click (Cmd+click on macOS) |
 | Maximise / restore | Ctrl+Shift+Enter, double-click a tab, or the header button |
 | Panel menu | right-click (Shift+right-click when the program uses the mouse) |
@@ -163,7 +163,7 @@ on the same machine. Open `https://<machine>.<tailnet>.ts.net/?token=…` once t
 
 Every option also has an environment variable; see `tmux-web --help` and
 `tmux-web serve --help`. State lives in `$XDG_STATE_HOME/tmux-web` (default
-`~/.local/state/tmux-web`): `layout.json`, `uploads/` (images, deleted after 7
+`~/.local/state/tmux-web`): `layout.json`, `uploads/` (uploaded files, deleted after 7
 days) and `token`.
 
 ## Development

@@ -7,7 +7,7 @@ import { ContextMenu } from './context-menu.js';
 import { EmptyState } from './empty-state.js';
 import { errorMessage } from './dom.js';
 import { EventsClient, BACKOFF_MS } from './events-client.js';
-import { dragHasFiles } from './image-upload.js';
+import { dragHasFiles } from './file-upload.js';
 import { LayoutPersistence } from './layout-persistence.js';
 import { LinkTooltip } from './link-tooltip.js';
 import { RenameDialog } from './rename-dialog.js';
@@ -194,7 +194,7 @@ for (const type of ['dragover', 'drop']) {
   window.addEventListener(type, (event) => {
     if (!dragHasFiles(event.dataTransfer)) return;
     event.preventDefault();
-    if (type === 'drop') toast.info('Drop images onto a terminal to upload them');
+    if (type === 'drop') toast.info('Drop files onto a terminal to upload them');
   });
 }
 

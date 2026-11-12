@@ -14,8 +14,9 @@ One Rust binary, `tmux-web`, that serves a browser UI for the local tmux server.
   split groups horizontally or vertically, maximise a group to fill the work area and restore it.
 - **Panel title = tmux session name**, exactly, and it follows renames done in tmux.
 - **Layout is persisted on the server** (survives closing Chrome and restarting tmux-web).
-- **Image paste**: paste / drop / pick an image → it is uploaded to the server → its absolute
-  path is pasted into the terminal (Claude Code turns a pasted image path into an attachment).
+- **File paste**: paste / drop / pick any file (images included) → it is uploaded to the server →
+  its absolute path is pasted into the terminal (Claude Code turns a pasted image path into an
+  attachment).
 - **Select and copy text** (copy-on-select, Ctrl+Shift+C, Ctrl+C while text is selected,
   context menu, and tmux copy-mode via OSC 52).
 - **Ctrl+click (Cmd+click on macOS) opens URLs** — plain-text URLs and OSC 8 hyperlinks.
@@ -101,6 +102,7 @@ Directory mode 0700, files 0600. Every write is atomic (`util::atomic_write`).
   layout.json                               {"version":u64,"updated_at":ms|null,"layout":<any JSON>|null}
   token                                     generated auth token (only when one is generated)
   uploads/img-<unixms>-<8 hex>.<png|jpg|gif|webp>
+  uploads/file-<unixms>-<8 hex>-<name>      (any other file; <name> sanitised, <= 100 bytes)
 ```
 
 ## 6. Rust library API (FROZEN)
@@ -335,15 +337,17 @@ behaviour is frozen by §7 and §8.
 | `POST /api/sessions/scroll` | `{"name":s,"lines":n}` (`n` < 0 = earlier output, > 0 = later; integer, 1 ≤ \|n\| ≤ 1000) | 200 `{"in_mode":bool,"scroll_position":n}` | 400 `invalid_name`, 400 `invalid_lines`, 404 `not_found`, 503 `no_server` |
 | `GET /api/layout` | — | `{"version":u64,"updated_at":ms\|null,"layout":any\|null}` | — |
 | `PUT /api/layout` | `{"layout":any,"client_id":s}` | 200 `{"version":u64,"updated_at":ms}` | 413 `too_large` (> 2 MiB) |
-| `POST /api/upload` | raw image bytes, `Content-Type: image/*` | 201 `{"path":abs,"bytes":n,"mime":s}` | 400 `empty`, 413 `too_large`, 415 `unsupported_type` |
+| `POST /api/upload` | raw bytes of any file, optional `?name=<file name>` | 201 `{"path":abs,"bytes":n,"mime":s}` | 400 `empty`, 413 `too_large` |
 | `POST /api/server/start` | — | 200 `{"started":false}` (tmux runs), `{"started":true,"session":s}` (created `--default-session`, a plain login shell); one start at a time | 500 `tmux_error` |
 
 `TmuxStatus` = `{"running":bool,"server":ServerIdentity|null,"sessions":[SessionInfo],"updated_at":ms}`,
 sessions sorted by name. `ServerIdentity` and `SessionInfo`
 serialise exactly as the serde structs in §6 (snake_case field names).
 
-Upload: the type is decided by magic bytes (PNG, JPEG, GIF, WebP); anything else is 415.
-The declared Content-Type is only a hint.
+Upload: images are still detected by magic bytes (PNG, JPEG, GIF, WebP) and named `img-…`.
+Anything else is stored as `file-<unixms>-<8 hex>-<sanitised name>` (name from `?name=`, reduced
+to `[A-Za-z0-9._-]`, at most 100 bytes, `upload` when empty) with mime
+`application/octet-stream`. The declared Content-Type is only a hint.
 
 ### 7.1 `GET /ws/events`
 
@@ -491,7 +495,7 @@ Required behaviour:
 4. **Group header actions** (right side, `data-testid` = `header-split-right`,
    `header-split-down`, `header-upload`, `header-maximize`): split right / split down open the
    picker in split mode and place the chosen session in a new group right of / below this group;
-   upload opens a file chooser (images, multiple) for the group's active panel; maximise toggles
+   upload opens a file chooser (any file, multiple) for the group's active panel; maximise toggles
    `maximizeGroup` / `exitMaximizedGroup` and shows the matching icon. Drag-and-drop of tabs
    (reorder, stack into another group, split to an edge) is dockview's built-in behaviour.
 5. **Terminal panel**: xterm `Terminal` (`allowProposedApi: true`, Unicode 11 active, scrollback
@@ -516,8 +520,8 @@ Required behaviour:
    `readText` returns "" (never expose the clipboard to the remote side).
 9. **Paste**: Ctrl+V, Ctrl+Shift+V, Cmd+V are not sent to the terminal (custom key handler returns
    false) so the browser fires a native paste; text pastes go through xterm (bracketed paste).
-10. **Images**: a capture-phase `paste` listener on the panel element intercepts clipboard items of
-    type `image/*` (preventDefault + stopPropagation), uploads each via `POST /api/upload`, then
+10. **Files**: a capture-phase `paste` listener on the panel element intercepts clipboard items of
+    kind `file`, any type (preventDefault + stopPropagation), uploads each via `POST /api/upload`, then
     `term.paste(paths.join(' ') + ' ')`. Same for files dropped on the terminal (only when
     `dataTransfer.types` includes `Files`, so dockview tab DnD is untouched) and the header upload
     button. Toast on success/failure.
@@ -526,7 +530,7 @@ Required behaviour:
     hovering a link shows a small tooltip "Ctrl+click to open".
 12. **Context menu** (right-click when the terminal is not tracking the mouse, or Shift+right-click
     always): Copy, Paste (navigator.clipboard.readText when available, else a toast "use Ctrl+V"),
-    Upload image…, Split right, Split down, Maximise/Restore, Rename session… (POST
+    Upload file…, Split right, Split down, Maximise/Restore, Rename session… (POST
     /api/sessions/rename), Close panel.
 13. **Keyboard**: Ctrl+Shift+Enter toggles maximise of the focused panel's group.
 14. **Persistence**: save (debounced 300 ms) on dockview layout change, maximise change, title/param
