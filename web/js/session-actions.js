@@ -1,5 +1,7 @@
 /**
  * Actions on sessions shared by the picker and the empty state.
+ * Snoozing closes the session's tabs (the tmux session and its shell stay); waking reopens
+ * and focuses it.
  */
 import { errorMessage, validateSessionName } from './dom.js';
 import { toast } from './toast.js';
@@ -8,33 +10,44 @@ const BYTES_PER_MB = 1024 * 1024;
 
 /**
  * Stop Claude in a session and remember its conversations (POST api/sessions/snooze).
- * Shows a toast either way.
+ * Shows a toast either way. On success the session's tabs are closed (closing a panel only
+ * detaches; the tmux session stays); on failure the tab stays.
  *
- * @param {{api: any}} services
+ * @param {{api: any, workspace: any}} services
  * @param {string} name
+ * @returns {Promise<boolean>} whether the snooze succeeded
  */
-export async function snoozeSession({ api }, name) {
+export async function snoozeSession({ api, workspace }, name) {
   try {
     const result = await api.snoozeSession(name);
     const megabytes = Math.round((result?.freed_bytes ?? 0) / BYTES_PER_MB);
     toast.success(`Snoozed \u201c${name}\u201d \u00b7 freed ${megabytes} MB`);
+    workspace.closeSession(name);
+    return true;
   } catch (err) {
     toast.error(errorMessage(err));
+    return false;
   }
 }
 
 /**
  * Reopen the snoozed conversations of a session (POST api/sessions/wake).
  *
- * @param {{api: any}} services
+ * On success the session is shown: its open panel is focused, else it becomes a tab.
+ *
+ * @param {{api: any, store: any, workspace: any}} services
  * @param {string} name
+ * @returns {Promise<boolean>} whether the wake succeeded
  */
-export async function wakeSession({ api }, name) {
+export async function wakeSession({ api, store, workspace }, name) {
   try {
     await api.wakeSession(name);
     toast.success(`Woke \u201c${name}\u201d`);
+    workspace.openSession({ name, id: store.session(name)?.id ?? null });
+    return true;
   } catch (err) {
     toast.error(errorMessage(err));
+    return false;
   }
 }
 

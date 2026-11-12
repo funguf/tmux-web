@@ -8,8 +8,10 @@
  *                  `referenceGroup` (an already open session is moved there).
  *
  * Each row has a red ✕ that opens the kill dialog (terminate the tmux session). A session
- * running Claude also has a moon button (snooze: stop Claude, keep its conversations); a
- * session with snoozed conversations shows a "snoozed" badge and a sun button (wake).
+ * running Claude also has a moon button (snooze: stop Claude, keep its conversations, close the
+ * session's tabs); a session with snoozed conversations shows a "snoozed" badge and a sun button
+ * (wake: reopen and focus it, then close the picker). "Open all" skips snoozed sessions that
+ * run no Claude; clicking such a row still opens it without waking.
  *
  * Keyboard: Up / Down move the highlight, Enter opens it, Escape closes.
  */
@@ -17,6 +19,9 @@ import { clear, el, plural } from './dom.js';
 import { svgIcon } from './icons.js';
 import { Popover } from './popover.js';
 import { createAndOpenSession, snoozeSession, wakeSession } from './session-actions.js';
+
+/** A session snoozed on purpose: snoozed conversations and no Claude running. */
+const isPutAway = (session) => (session.snoozed ?? 0) > 0 && (session.claude_panes ?? 0) === 0;
 
 export class SessionPicker {
   /**
@@ -213,7 +218,7 @@ export class SessionPicker {
       this.list.append(row);
     });
 
-    const notOpen = all.filter((session) => !open.has(session.name));
+    const notOpen = all.filter((session) => !open.has(session.name) && !isPutAway(session));
     this.openAllButton.textContent = notOpen.length > 0 ? `Open all (${notOpen.length})` : 'Open all';
     this.openAllButton.disabled = notOpen.length === 0;
     this.openAllButton.hidden = this.mode === 'split';
@@ -232,8 +237,9 @@ export class SessionPicker {
       on: {
         click: () => {
           button.disabled = true;
-          void action(this.services, session.name).finally(() => {
+          void action(this.services, session.name).then((ok) => {
             button.disabled = false;
+            if (ok && kind === 'wake') this.close();
           });
         },
       },
@@ -309,7 +315,9 @@ export class SessionPicker {
   }
 
   #openAll() {
-    const sessions = this.#sessions().map((session) => ({ name: session.name, id: session.id }));
+    const sessions = this.#sessions()
+      .filter((session) => !isPutAway(session))
+      .map((session) => ({ name: session.name, id: session.id }));
     this.close();
     this.services.workspace.openAll(sessions);
   }

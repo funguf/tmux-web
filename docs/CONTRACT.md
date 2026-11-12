@@ -505,7 +505,11 @@ Required behaviour:
    A session with `claude_panes > 0` also has a moon button before the ✕ (`session-picker-snooze`,
    no confirmation: it is reversible) calling `POST /api/sessions/snooze`; one with `snoozed > 0`
    shows a `badge-snoozed` badge (`session-picker-snoozed`) and a sun button
-   (`session-picker-wake`) calling `POST /api/sessions/wake`. Neither opens the session. Toasts:
+   (`session-picker-wake`) calling `POST /api/sessions/wake`. A successful snooze closes every tab of that session (the picker
+   stays open and the row updates; the tmux session and its shell stay); a successful wake opens the
+   session (focusing its panel, else adding a tab) and closes the picker. "Open all" (and its count)
+   skips sessions with `snoozed > 0` and `claude_panes === 0`; clicking such a row still opens it
+   without waking. Toasts:
    `Snoozed “<name>” · freed <N> MB`, `Woke “<name>”`, or the server's error message. The tab of a
    session with `snoozed > 0` shows a moon icon (`tab-snoozed`, title "Claude is snoozed"), and the
    terminal context menu has "Snooze Claude" (`claude_panes > 0`) and "Wake Claude" (`snoozed > 0`).

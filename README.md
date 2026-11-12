@@ -28,8 +28,9 @@ that runs Claude Code.
   session after a confirmation and closes its panels.
 - **Snooze Claude.** A moon button on a session row (or "Snooze Claude" in the terminal menu) stops
   the Claude Code processes of that session to free memory but remembers their conversations; the
-  tmux session and its shell stay. The sun button / "Wake Claude" types `claude … --resume <id>`
-  back into the same panes. A Claude that is mid-reply is not snoozed.
+  tmux session and its shell stay, and its tabs are closed. The sun button / "Wake Claude" types
+  `claude … --resume <id>` back into the same panes, reopens the session and focuses it. "Open all"
+  skips snoozed sessions. A Claude that is mid-reply is not snoozed.
 - **Crash recovery is left to tmux itself**, for example tmux-resurrect and tmux-continuum;
   tmux-web keeps no snapshots and restores nothing.
 
