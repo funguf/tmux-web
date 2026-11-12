@@ -460,6 +460,17 @@ pub fn rename_session(r: &dyn TmuxRunner, old: &str, new: &str) -> Result<(), Tm
     Ok(())
 }
 
+/// `kill-session -t =<name>`: terminate a session and everything running in it.
+pub fn kill_session(r: &dyn TmuxRunner, name: &str) -> Result<(), TmuxError> {
+    let args = vec![
+        "kill-session".to_string(),
+        "-t".to_string(),
+        exact_target(name),
+    ];
+    r.run(&args)?;
+    Ok(())
+}
+
 /// Whether a pane is in a mode (copy mode) and how far it is scrolled back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneScroll {
@@ -1285,6 +1296,32 @@ mod tests {
         ));
         assert!(matches!(
             rename_session(&runner, "old", "new"),
+            Err(TmuxError::NoServer)
+        ));
+    }
+
+    #[test]
+    fn kill_session_targets_the_name_exactly() {
+        let runner = ScriptedRunner::new(vec![Ok(String::new())]);
+        kill_session(&runner, "old#1").unwrap();
+        assert_eq!(
+            runner.calls(),
+            vec![to_args(&["kill-session", "-t", "=old#1"])]
+        );
+    }
+
+    #[test]
+    fn kill_session_passes_errors_through() {
+        let runner = ScriptedRunner::new(vec![
+            Err(TmuxError::Command("can't find session: old".into())),
+            Err(TmuxError::NoServer),
+        ]);
+        assert!(matches!(
+            kill_session(&runner, "old"),
+            Err(TmuxError::Command(_))
+        ));
+        assert!(matches!(
+            kill_session(&runner, "old"),
             Err(TmuxError::NoServer)
         ));
     }

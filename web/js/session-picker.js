@@ -7,6 +7,8 @@
  *  - mode "split": the chosen session goes into a new group right of / below
  *                  `referenceGroup` (an already open session is moved there).
  *
+ * Each row has a red ✕ that opens the kill dialog (terminate the tmux session).
+ *
  * Keyboard: Up / Down move the highlight, Enter opens it, Escape closes.
  */
 import { clear, el, plural } from './dom.js';
@@ -166,6 +168,7 @@ export class SessionPicker {
     }
     this.visible.forEach((session, index) => {
       const isOpen = open.has(session.name);
+      const row = el('div', { class: 'picker-row', role: 'presentation' });
       const item = el('button', {
         type: 'button',
         class: `picker-item${index === this.highlight ? ' is-highlighted' : ''}`,
@@ -188,7 +191,18 @@ export class SessionPicker {
         item.append(badge);
       }
       if (isOpen) item.append(el('span', { class: 'badge badge-open', testid: 'session-picker-open', text: 'open' }));
-      this.list.append(item);
+      const kill = el('button', {
+        type: 'button',
+        class: 'picker-kill',
+        testid: 'session-picker-kill',
+        title: `Terminate session “${session.name}”`,
+        'aria-label': `Terminate session “${session.name}”`,
+        data: { session: session.name },
+        on: { click: () => this.#confirmKill(session) },
+      });
+      kill.append(svgIcon('close', { size: 12 }));
+      row.append(item, kill);
+      this.list.append(row);
     });
 
     const notOpen = all.filter((session) => !open.has(session.name));
@@ -256,6 +270,12 @@ export class SessionPicker {
     const placement = this.#placement();
     this.close();
     this.services.workspace.openSession({ name: session.name, id: session.id }, placement);
+  }
+
+  /** The popover's Escape handler would swallow the dialog's Escape, so close the picker first. */
+  #confirmKill(session) {
+    this.close();
+    this.services.killDialog.open({ session });
   }
 
   #openAll() {

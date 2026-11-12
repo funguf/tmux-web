@@ -105,6 +105,11 @@ export class Api {
     return this.request('POST', 'api/sessions/rename', { json: { name, new_name: newName } });
   }
 
+  /** Terminate a tmux session (POST api/sessions/kill). Resolves to {killed}. */
+  killSession(name) {
+    return this.request('POST', 'api/sessions/kill', { json: { name } });
+  }
+
   /**
    * Scroll the tmux history of a session (POST api/sessions/scroll): `lines` < 0 goes back
    * to earlier output, > 0 forward. Resolves to {in_mode, scroll_position}.

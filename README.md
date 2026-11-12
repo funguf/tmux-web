@@ -24,6 +24,8 @@ that runs Claude Code.
   Claude Code in the session picker, the empty state and the tabs.
 - **Bell tab flash.** When the program in a panel that is out of sight rings the terminal bell,
   its tab flashes orange until you focus that panel.
+- **Terminate sessions.** The session picker has a red cross on each row that kills that tmux
+  session after a confirmation and closes its panels.
 - **Crash recovery is left to tmux itself**, for example tmux-resurrect and tmux-continuum;
   tmux-web keeps no snapshots and restores nothing.
 

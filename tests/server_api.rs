@@ -326,6 +326,44 @@ async fn renaming_without_a_server_is_503_no_server() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sessions_can_be_killed_with_200_404_and_400() {
+    let tmux = Tmux::new();
+    let sandbox = Sandbox::new();
+    let server = TestServer::start(&tmux, &sandbox, &[]).await;
+    tmux.new_session("alpha");
+    tmux.new_session("beta");
+
+    let response = server
+        .post_json("/api/sessions/kill", &json!({"name": "alpha"}))
+        .await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    assert_eq!(response.json(), json!({"killed": "alpha"}));
+    assert!(!tmux.has_session("alpha"), "tmux no longer has the session");
+    assert!(tmux.has_session("beta"));
+    assert_eq!(names(&server.get_json("/api/status").await), ["beta"]);
+
+    let missing = server
+        .post_json("/api/sessions/kill", &json!({"name": "alpha"}))
+        .await;
+    assert_eq!(
+        (missing.status, missing.error_code().as_str()),
+        (404, "not_found")
+    );
+    let empty = server
+        .post_json("/api/sessions/kill", &json!({"name": ""}))
+        .await;
+    assert_eq!(
+        (empty.status, empty.error_code().as_str()),
+        (400, "invalid_name")
+    );
+    assert_eq!(
+        tmux.session_names(),
+        ["beta"],
+        "the failures killed nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sessions_scroll_through_tmux_history_without_typing_into_the_pane() {
     let tmux = Tmux::new();
     let sandbox = Sandbox::new();

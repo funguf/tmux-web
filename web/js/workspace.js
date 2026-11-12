@@ -94,6 +94,13 @@ export class Workspace extends EventHub {
     return this.api.panels.find((panel) => Workspace.sessionOf(panel) === name);
   }
 
+  /** Close every panel that shows `name` (the tmux session is gone). */
+  closeSession(name) {
+    for (const panel of this.api.panels.filter((candidate) => Workspace.sessionOf(candidate) === name)) {
+      panel.api.close();
+    }
+  }
+
   isMaximized(panelId) {
     return this.api.getPanel(panelId)?.group.api.isMaximized() ?? false;
   }

@@ -278,6 +278,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/status", get(api_status))
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/rename", post(rename_session))
+        .route("/api/sessions/kill", post(kill_session))
         .route("/api/sessions/scroll", post(scroll_session))
         .route("/api/layout", get(get_layout).put(put_layout))
         .route("/api/upload", post(upload))
@@ -522,6 +523,37 @@ async fn rename_session(State(app): State<AppState>, request: Request) -> ApiRes
         })?;
     app.monitor.refresh(Duration::ZERO).await;
     Ok(Json(json!({"name": body.new_name})))
+}
+
+#[derive(Deserialize)]
+struct KillSession {
+    name: String,
+}
+
+async fn kill_session(State(app): State<AppState>, request: Request) -> ApiResult<Json<Value>> {
+    let body: KillSession = json_body(request).await?;
+    if body.name.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "the session name must not be empty",
+        ));
+    }
+    let runner = Arc::clone(&app.runner);
+    let name = body.name.clone();
+    blocking(move || tmux::kill_session(&*runner, &name))
+        .await?
+        .map_err(|err| match err {
+            TmuxError::NoServer => ApiError::tmux(&TmuxError::NoServer),
+            TmuxError::Command(message) if message.contains("can't find session") => ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("no session named {:?}", body.name),
+            ),
+            other => ApiError::tmux(&other),
+        })?;
+    app.monitor.refresh(Duration::ZERO).await;
+    Ok(Json(json!({"killed": body.name})))
 }
 
 #[derive(Deserialize)]
@@ -1014,6 +1046,17 @@ mod tests {
                         None => Err(TmuxError::Command(format!("can't find session: {old}"))),
                     }
                 }
+                "kill-session" => {
+                    let sessions = guard.as_mut().ok_or(TmuxError::NoServer)?;
+                    let name = arg(2).trim_start_matches('=').to_string();
+                    match sessions.iter().position(|(_, existing)| *existing == name) {
+                        Some(index) => {
+                            sessions.remove(index);
+                            Ok(String::new())
+                        }
+                        None => Err(TmuxError::Command(format!("can't find session: {name}"))),
+                    }
+                }
                 // Snapshots (once core is real) ask for windows and panes too; a refusal is
                 // only logged by the monitor, which is all these API tests need from it.
                 other => Err(TmuxError::Command(format!("the fake tmux has no {other}"))),
@@ -1350,6 +1393,40 @@ mod tests {
             json!({"name": "omega", "new_name": "x"}),
         )
         .await;
+        assert_eq!(
+            (reply.status, error_code(&reply).as_str()),
+            (StatusCode::SERVICE_UNAVAILABLE, "no_server")
+        );
+    }
+
+    #[tokio::test]
+    async fn killing_covers_ok_not_found_invalid_and_no_server() {
+        let tmux = FakeTmux::with_sessions(&["alpha", "beta"]);
+        let h = harness_with(tmux.clone(), &[]);
+        let reply = post_json(&h, "/api/sessions/kill", json!({"name": "alpha"})).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json(), json!({"killed": "alpha"}));
+        let names: Vec<String> = get_json(&h, "/api/status").await.json()["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["beta"], "the status reflects the kill at once");
+
+        let reply = post_json(&h, "/api/sessions/kill", json!({"name": "alpha"})).await;
+        assert_eq!(
+            (reply.status, error_code(&reply).as_str()),
+            (StatusCode::NOT_FOUND, "not_found")
+        );
+        let reply = post_json(&h, "/api/sessions/kill", json!({"name": ""})).await;
+        assert_eq!(
+            (reply.status, error_code(&reply).as_str()),
+            (StatusCode::BAD_REQUEST, "invalid_name")
+        );
+
+        *tmux.sessions.lock().unwrap() = None;
+        let reply = post_json(&h, "/api/sessions/kill", json!({"name": "beta"})).await;
         assert_eq!(
             (reply.status, error_code(&reply).as_str()),
             (StatusCode::SERVICE_UNAVAILABLE, "no_server")
@@ -1733,6 +1810,7 @@ mod tests {
         for (method, path) in [
             (Method::POST, "/api/sessions"),
             (Method::POST, "/api/sessions/rename"),
+            (Method::POST, "/api/sessions/kill"),
             (Method::PUT, "/api/layout"),
             (Method::POST, "/api/upload"),
             (Method::DELETE, "/api/anything"),

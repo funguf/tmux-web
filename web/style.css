@@ -221,6 +221,16 @@ button:disabled {
   background: var(--accent-bg-hover);
 }
 
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 85%, #000);
+}
+
 .btn-ghost {
   border-color: transparent;
   background: transparent;
@@ -600,6 +610,39 @@ button:disabled {
   border-radius: var(--radius);
   background: transparent;
   text-align: left;
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.picker-row .picker-item {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+.picker-kill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--danger);
+  opacity: 0.7;
+}
+
+.picker-kill:hover,
+.picker-kill:focus-visible {
+  opacity: 1;
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
 }
 
 .picker-item:hover,
@@ -998,4 +1041,8 @@ button:disabled {
   .tmw-tab {
     min-width: 70px;
   }
+}
+
+.modal-text {
+  margin: 0 0 6px;
 }

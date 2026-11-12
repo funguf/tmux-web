@@ -334,6 +334,7 @@ behaviour is frozen by §7 and §8.
 | `GET /api/status` | — | `TmuxStatus` (below) | — |
 | `POST /api/sessions` | `{"name":s,"cwd"?:s}` | 201 `{"id":"$4","name":s}` | 400 `invalid_name`, 409 `exists`, 500 `tmux_error` |
 | `POST /api/sessions/rename` | `{"name":old,"new_name":new}` | 200 `{"name":new}` | 400 `invalid_name`, 404 `not_found`, 409 `exists`, 503 `no_server` |
+| `POST /api/sessions/kill` | `{"name":s}` | 200 `{"killed":s}` | 400 `invalid_name` (empty), 404 `not_found`, 503 `no_server`, 500 `tmux_error` |
 | `POST /api/sessions/scroll` | `{"name":s,"lines":n}` (`n` < 0 = earlier output, > 0 = later; integer, 1 ≤ \|n\| ≤ 1000) | 200 `{"in_mode":bool,"scroll_position":n}` | 400 `invalid_name`, 400 `invalid_lines`, 404 `not_found`, 503 `no_server` |
 | `GET /api/layout` | — | `{"version":u64,"updated_at":ms\|null,"layout":any\|null}` | — |
 | `PUT /api/layout` | `{"layout":any,"client_id":s}` | 200 `{"version":u64,"updated_at":ms}` | 413 `too_large` (> 2 MiB) |
@@ -486,6 +487,10 @@ Required behaviour:
    "New session…" row (`new-session-input`) creating via `POST /api/sessions`; "Open all"
    (`open-all-btn`) adding every session not yet open as tabs. Choosing a session that is
    already open focuses its panel (add mode) or moves that panel to the new split (split mode).
+   Each row is a `div.picker-row` holding the item button and a red ✕ (`session-picker-kill`,
+   `data-session=<name>`, not part of the ↑/↓ list) that closes the picker and opens the confirm
+   dialog `kill-dialog` (Cancel `kill-cancel-btn`, Terminate `kill-confirm-btn`, error
+   `kill-error`); Terminate calls `POST /api/sessions/kill` and closes every panel of that session.
 3. **Dockview**: `defaultRenderer: 'always'`, floating groups disabled, dark theme, custom tab
    renderer: `<div data-testid="tab" data-session=<name>>` with a connection dot, the title
    (exactly the session name), a Claude badge, and a close button. Double-click on a tab toggles

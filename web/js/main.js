@@ -10,6 +10,7 @@ import { EventsClient, BACKOFF_MS } from './events-client.js';
 import { dragHasFiles } from './file-upload.js';
 import { LayoutPersistence } from './layout-persistence.js';
 import { LinkTooltip } from './link-tooltip.js';
+import { KillDialog } from './kill-dialog.js';
 import { RenameDialog } from './rename-dialog.js';
 import { startTmuxOnFirstStatus } from './server-actions.js';
 import { SessionPicker } from './session-picker.js';
@@ -57,6 +58,7 @@ const ready = new Promise((resolve) => {
 const workspaceWrap = document.getElementById('workspace-wrap');
 const workspace = new Workspace(document.getElementById('workspace'), services);
 services.workspace = workspace;
+services.killDialog = new KillDialog(services);
 services.picker = new SessionPicker(services);
 services.settings = new SettingsPopover(services);
 services.renameDialog = new RenameDialog(services);
