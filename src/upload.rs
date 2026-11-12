@@ -189,8 +189,10 @@ pub(crate) fn safe_file_name(raw: &str) -> String {
     name
 }
 
-/// True for names this module could have generated: `img-<digits>-<8 hex>.<ext>` or
-/// `file-<digits>-<8 hex>-<safe name>`.
+/// True for names shaped like the ones this module generates: `img-<digits>-<8 hex>.<ext>` or
+/// `file-<digits>-<8 hex>-<safe name>`. For `file-` uploads this also matches
+/// `util::atomic_write`'s temporary files (`<name>.tmp-<pid>-<hex>`), which is harmless: the
+/// sweep only removes files older than the retention period (at least a day).
 fn is_upload_name(name: &str) -> bool {
     if let Some(rest) = name.strip_prefix("file-") {
         return is_file_upload_rest(rest);
@@ -225,6 +227,7 @@ fn is_file_upload_rest(rest: &str) -> bool {
         && random.len() == 8
         && random.bytes().all(|b| b.is_ascii_hexdigit())
         && !safe.is_empty()
+        && !safe.starts_with(['.', '-'])
         && safe.len() <= MAX_SAFE_NAME
         && safe
             .bytes()
@@ -466,6 +469,8 @@ mod tests {
             "file--0123abcd-x",
             "file-12-0123abcd",
             "file-1x-0123abcd-x",
+            "file-1-0123abcd-.env",
+            "file-1-0123abcd--x",
         ] {
             assert!(!is_upload_name(bad), "{bad}");
         }

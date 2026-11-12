@@ -1687,6 +1687,19 @@ mod tests {
             "{:?}",
             reply.json()
         );
+        // A malformed escape is kept literally (then sanitised); valid escapes and '+' are decoded.
+        let reply = post("/api/upload?name=%zz", b"x").await;
+        assert_eq!(reply.status, StatusCode::CREATED);
+        assert!(reply.json()["path"].as_str().unwrap().ends_with("-_zz"));
+        let reply = post("/api/upload?name=a%2Bb%26c%23d.txt", b"x").await;
+        assert_eq!(reply.status, StatusCode::CREATED);
+        assert!(reply.json()["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("-a_b_c_d.txt"));
+        let reply = post("/api/upload?name=a+b.txt", b"x").await;
+        assert_eq!(reply.status, StatusCode::CREATED);
+        assert!(reply.json()["path"].as_str().unwrap().ends_with("-a_b.txt"));
         // An SVG is just a file.
         let reply = post("/api/upload", b"<svg xmlns='http://www.w3.org/2000/svg'/>").await;
         assert_eq!(reply.status, StatusCode::CREATED);

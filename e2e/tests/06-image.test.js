@@ -143,6 +143,65 @@ describe('image paste and drop', () => {
     assert.deepEqual(page.__errors, []);
   });
 
+  /** Fire a synthetic paste on the panel's textarea; `items` are {text} or {name,type,content}. */
+  function syntheticPaste(page, panelId, { text, file }) {
+    return page.evaluate(
+      ({ id, text, file }) => {
+        const dt = new DataTransfer();
+        if (text !== undefined) dt.setData('text/plain', text);
+        if (file) dt.items.add(new File([file.content], file.name, { type: file.type }));
+        const area = document.querySelector(`[data-testid="terminal-panel"][data-panel-id="${id}"] .xterm-helper-textarea`);
+        const event = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+        area.dispatchEvent(event);
+        return { carried: event.clipboardData !== null && event.clipboardData.types.length > 0, prevented: event.defaultPrevented };
+      },
+      { id: panelId, text, file },
+    );
+  }
+
+  it('a synthetic text-only paste reaches the prompt and uploads nothing', TEST, async () => {
+    const { env } = ctx;
+    const { page, panel } = await openTerminal();
+    const before = env.uploads().length;
+    const result = await syntheticPaste(page, panel.id, { text: 'echo pasted-text-ok' });
+    assert.equal(result.carried, true, 'the synthetic ClipboardEvent carries clipboardData');
+    await ui.waitForScreen(page, panel.id, (line) => line === '$ echo pasted-text-ok', { what: 'the pasted text on the prompt' });
+    assert.equal(env.uploads().length, before, 'no upload for text');
+    assert.deepEqual(page.__errors, []);
+  });
+
+  it('a synthetic paste of a non-image file uploads it and pastes its path', TEST, async () => {
+    const { env } = ctx;
+    const { page, panel } = await openTerminal();
+    const before = env.uploads().length;
+    await syntheticPaste(page, panel.id, { file: { name: 'report (final).pdf', type: 'application/pdf', content: '%PDF-1.4 tiny' } });
+    const file = (await uploadedPaths(before + 1)).find((candidate) => path.basename(candidate).endsWith('-report__final_.pdf'));
+    assert.match(path.basename(file ?? ''), /^file-\d+-[0-9a-f]{8}-report__final_\.pdf$/);
+    assert.equal(fs.readFileSync(file, 'utf8'), '%PDF-1.4 tiny');
+    await ui.waitForScreen(page, panel.id, (line) => line === `$ ${file} `, { what: `the prompt to show ${file}` });
+    assert.deepEqual(page.__errors, []);
+  });
+
+  it('a synthetic paste of text plus a file uploads the file and does not paste the text', TEST, async () => {
+    const { env } = ctx;
+    const { page, panel } = await openTerminal();
+    const before = env.uploads().length;
+    await syntheticPaste(page, panel.id, { text: 'notes.txt', file: { name: 'notes.txt', type: 'text/plain', content: 'mixed paste' } });
+    const file = (await uploadedPaths(before + 1)).find((candidate) => path.basename(candidate).endsWith('-notes.txt'));
+    assert.equal(fs.readFileSync(file, 'utf8'), 'mixed paste');
+    await ui.waitForScreen(page, panel.id, (line) => line === `$ ${file} `, { what: 'only the path on the prompt line' });
+    assert.deepEqual(page.__errors, []);
+  });
+
+  it('shellQuote leaves safe paths alone and single-quotes the rest', TEST, async () => {
+    const { page } = await openTerminal();
+    const out = await page.evaluate(async () => {
+      const m = await import('./js/file-upload.js');
+      return ['/a/b-c_d.txt', '/my dir/x.txt', "/it's/x"].map(m.shellQuote);
+    });
+    assert.deepEqual(out, ['/a/b-c_d.txt', "'/my dir/x.txt'", "'/it'\\''s/x'"]);
+  });
+
   it('dropped JPEG, GIF and WebP files keep their type, and their paths come in the order dropped', TEST, async () => {
     const { env } = ctx;
     const { page, panel } = await openTerminal();

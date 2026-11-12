@@ -22,6 +22,39 @@ export function filesFromClipboard(clipboardData) {
   return files;
 }
 
+/**
+ * Files and folders in a drop. Folders cannot be uploaded and are only counted.
+ * Must be called synchronously inside the drop event handler.
+ * @param {DataTransfer|null} dataTransfer
+ * @returns {{files: File[], folders: number}}
+ */
+export function filesFromDrop(dataTransfer) {
+  const items = Array.from(dataTransfer?.items ?? []);
+  if (items.length === 0) return { files: Array.from(dataTransfer?.files ?? []), folders: 0 };
+  const files = [];
+  let folders = 0;
+  for (const item of items) {
+    if (item.kind !== 'file') continue;
+    if (item.webkitGetAsEntry?.()?.isDirectory) {
+      folders += 1;
+      continue;
+    }
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return { files, folders };
+}
+
+/**
+ * Quote a path for the shell: unchanged when it only has safe characters, else single-quoted.
+ * @param {string} path
+ * @returns {string}
+ */
+export function shellQuote(path) {
+  if (/^[A-Za-z0-9_\/.:@%+=,-]+$/.test(path)) return path;
+  return `'${path.replaceAll("'", "'\\''")}'`;
+}
+
 /** Whether a drag carries OS files (as opposed to a dockview tab / text drag). */
 export function dragHasFiles(dataTransfer) {
   return Array.from(dataTransfer?.types ?? []).includes('Files');

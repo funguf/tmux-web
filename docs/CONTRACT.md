@@ -522,9 +522,12 @@ Required behaviour:
    false) so the browser fires a native paste; text pastes go through xterm (bracketed paste).
 10. **Files**: a capture-phase `paste` listener on the panel element intercepts clipboard items of
     kind `file`, any type (preventDefault + stopPropagation), uploads each via `POST /api/upload`, then
-    `term.paste(paths.join(' ') + ' ')`. Same for files dropped on the terminal (only when
+    `term.paste(paths.map(shellQuote).join(' ') + ' ')`: a path with any character outside
+    `[A-Za-z0-9_/.:@%+=,-]` is single-quoted (`'` becomes `'\''`). When the clipboard holds any
+    file (including a file copied in a file manager, which also carries its name as text) the files
+    are uploaded and the text is not pasted. Same for files dropped on the terminal (only when
     `dataTransfer.types` includes `Files`, so dockview tab DnD is untouched) and the header upload
-    button. Toast on success/failure.
+    button; a dropped folder is skipped with a warning toast. Toast on success/failure.
 11. **Links**: WebLinksAddon handler and the terminal `linkHandler` (OSC 8, http/https only)
     open `window.open(url, '_blank', 'noopener,noreferrer')` **only when Ctrl or Meta is held**;
     hovering a link shows a small tooltip "Ctrl+click to open".

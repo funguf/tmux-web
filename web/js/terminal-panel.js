@@ -20,9 +20,9 @@ import { Unicode11Addon } from '../vendor/addon-unicode11/addon-unicode11.mjs';
 
 import { AttachConnection, RECOVERABLE_REASONS } from './attach-connection.js';
 import { canReadClipboard, copyText, osc52Provider, readClipboardText } from './clipboard.js';
-import { debounce, el, errorMessage } from './dom.js';
+import { debounce, el, errorMessage, plural } from './dom.js';
 import { EventHub } from './emitter.js';
-import { dragHasFiles, filesFromClipboard, pickFiles, uploadFiles } from './file-upload.js';
+import { dragHasFiles, filesFromClipboard, filesFromDrop, pickFiles, shellQuote, uploadFiles } from './file-upload.js';
 import { PanelOverlay } from './panel-overlay.js';
 import { createKeyHandler } from './terminal-keys.js';
 import { createLinkHandlers } from './terminal-links.js';
@@ -226,7 +226,7 @@ export class TerminalPanel {
   async uploadFiles(files) {
     const paths = await uploadFiles(this.services.api, files);
     if (paths.length === 0 || this.disposed || !this.term) return;
-    this.term.paste(`${paths.join(' ')} `);
+    this.term.paste(`${paths.map(shellQuote).join(' ')} `);
     if (!this.connected) toast.warn(`Not connected; the file path is ${paths.join(' ')}`);
   }
 
@@ -572,7 +572,9 @@ export class TerminalPanel {
         event.stopPropagation();
         dragDepth = 0;
         setDropActive(false);
-        void this.uploadFiles(Array.from(event.dataTransfer.files));
+        const { files, folders } = filesFromDrop(event.dataTransfer);
+        if (folders > 0) toast.warn(`${plural(folders, 'folder')} skipped: drop the files inside instead`);
+        if (files.length > 0) void this.uploadFiles(files);
       },
       true,
     );
