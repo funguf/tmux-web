@@ -308,6 +308,8 @@ pub struct SessionInfo {
     pub group: Option<String>, // session group name when grouped
     #[serde(default)]
     pub claude_panes: u32, // 0 from tmux; the monitor fills it in from the latest snapshot
+    #[serde(default)]
+    pub snoozed: u32, // 0 from tmux; the monitor fills it in from the snooze store
 }
 
 /// `list-sessions -F SESSION_FORMAT`, tab separated, session name LAST.
@@ -365,6 +367,7 @@ fn parse_session_line(line: &str) -> Result<(ServerIdentity, SessionInfo), Strin
         activity: parse_number(activity, "activity time")?,
         group: (grouped == "1" && !group.is_empty()).then(|| group.to_string()),
         claude_panes: 0,
+        snoozed: 0,
     };
     Ok((identity, session))
 }
@@ -466,6 +469,31 @@ pub fn kill_session(r: &dyn TmuxRunner, name: &str) -> Result<(), TmuxError> {
         "kill-session".to_string(),
         "-t".to_string(),
         exact_target(name),
+    ];
+    r.run(&args)?;
+    Ok(())
+}
+
+/// `send-keys -t <target> -l <text>`: types `text` into a pane literally (no key-name lookup).
+pub fn send_text(r: &dyn TmuxRunner, target: &str, text: &str) -> Result<(), TmuxError> {
+    let args = vec![
+        "send-keys".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "-l".to_string(),
+        text.to_string(),
+    ];
+    r.run(&args)?;
+    Ok(())
+}
+
+/// `send-keys -t <target> Enter`.
+pub fn send_enter(r: &dyn TmuxRunner, target: &str) -> Result<(), TmuxError> {
+    let args = vec![
+        "send-keys".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "Enter".to_string(),
     ];
     r.run(&args)?;
     Ok(())
@@ -821,12 +849,14 @@ mod tests {
             activity: 20,
             group: None,
             claude_panes: 4,
+            snoozed: 0,
         };
         assert_eq!(
             serde_json::to_value(&info).unwrap(),
             json!({
                 "id": "$3", "name": "main", "windows": 2, "attached": 1,
-                "created": 10, "activity": 20, "group": null, "claude_panes": 4
+                "created": 10, "activity": 20, "group": null, "claude_panes": 4,
+                "snoozed": 0
             })
         );
         let without: SessionInfo = serde_json::from_value(json!({
@@ -835,6 +865,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(without.claude_panes, 0);
+        assert_eq!(without.snoozed, 0);
         assert_eq!(without.group.as_deref(), Some("g"));
     }
 
@@ -896,6 +927,7 @@ mod tests {
                     activity: 1700000200,
                     group: None,
                     claude_panes: 0,
+                    snoozed: 0,
                 },
                 SessionInfo {
                     id: "$1".to_string(),
@@ -906,6 +938,7 @@ mod tests {
                     activity: 1700000200,
                     group: None,
                     claude_panes: 0,
+                    snoozed: 0,
                 },
             ]
         );
@@ -1322,6 +1355,29 @@ mod tests {
         ));
         assert!(matches!(
             kill_session(&runner, "old"),
+            Err(TmuxError::NoServer)
+        ));
+    }
+
+    #[test]
+    fn send_text_types_literally_and_enter_is_a_key() {
+        let runner = ScriptedRunner::new(vec![Ok(String::new()), Ok(String::new())]);
+        send_text(&runner, "%3", "claude --resume x").unwrap();
+        send_enter(&runner, "%3").unwrap();
+        assert_eq!(
+            runner.calls(),
+            vec![
+                to_args(&["send-keys", "-t", "%3", "-l", "claude --resume x"]),
+                to_args(&["send-keys", "-t", "%3", "Enter"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn send_text_passes_errors_through() {
+        let runner = ScriptedRunner::new(vec![Err(TmuxError::NoServer)]);
+        assert!(matches!(
+            send_text(&runner, "%3", "x"),
             Err(TmuxError::NoServer)
         ));
     }

@@ -100,6 +100,7 @@ Directory mode 0700, files 0600. Every write is atomic (`util::atomic_write`).
 ```
 <state-dir>/
   layout.json                               {"version":u64,"updated_at":ms|null,"layout":<any JSON>|null}
+  snoozed.json                              {"version":1,"entries":[SnoozeEntry]} snoozed Claude conversations (src/snooze.rs)
   token                                     generated auth token (only when one is generated)
   uploads/img-<unixms>-<8 hex>.<png|jpg|gif|webp>
   uploads/file-<unixms>-<8 hex>-<name>      (any other file; <name> sanitised, <= 100 bytes)
@@ -205,6 +206,8 @@ pub struct SessionInfo {
     pub group: Option<String>,   // session group name when grouped
     #[serde(default)]
     pub claude_panes: u32,       // 0 from tmux; the monitor fills it in from its latest in-memory pane scan
+    #[serde(default)]
+    pub snoozed: u32,            // 0 from tmux; the monitor fills in the snooze-store entries of this session whose conversation is not running in it
 }
 
 /// `list-sessions -F SESSION_FORMAT`, tab separated, session name LAST.
@@ -272,6 +275,10 @@ pub struct ClaudeSnap {
     pub kind: Option<String>,       // "interactive", … from the sessions file
     pub name: Option<String>,
     pub source: ClaudeIdSource,
+    #[serde(default)]
+    pub status: Option<String>,     // sessions file `status`: "busy" while Claude is replying, else "idle", "waiting", …
+    #[serde(default)]
+    pub config_dir: Option<String>, // the CLAUDE_CONFIG_DIR the process was started with (absolute); None when it has none
 }
 
 #[derive(Clone, Debug)]
@@ -335,6 +342,8 @@ behaviour is frozen by §7 and §8.
 | `POST /api/sessions` | `{"name":s,"cwd"?:s}` | 201 `{"id":"$4","name":s}` | 400 `invalid_name`, 409 `exists`, 500 `tmux_error` |
 | `POST /api/sessions/rename` | `{"name":old,"new_name":new}` | 200 `{"name":new}` | 400 `invalid_name`, 404 `not_found`, 409 `exists`, 503 `no_server` |
 | `POST /api/sessions/kill` | `{"name":s}` | 200 `{"killed":s}` | 400 `invalid_name` (empty), 404 `not_found`, 503 `no_server`, 500 `tmux_error` |
+| `POST /api/sessions/snooze` | `{"name":s}` | 200 `{"snoozed":n,"freed_bytes":n}` | 400 `invalid_name`, 404 `not_found`, 409 `no_claude` / `no_session_id` / `busy` / `not_in_shell` (the whole request is refused, nothing is stopped), 503 `no_server`, 500 `internal` (a Claude did not stop even after SIGKILL) |
+| `POST /api/sessions/wake` | `{"name":s}` | 200 `{"woken":n}` | 400 `invalid_name`, 404 `not_found`, 409 `not_snoozed` / `pane_missing` / `pane_busy` (all checked before anything is typed), 503 `no_server` |
 | `POST /api/sessions/scroll` | `{"name":s,"lines":n}` (`n` < 0 = earlier output, > 0 = later; integer, 1 ≤ \|n\| ≤ 1000) | 200 `{"in_mode":bool,"scroll_position":n}` | 400 `invalid_name`, 400 `invalid_lines`, 404 `not_found`, 503 `no_server` |
 | `GET /api/layout` | — | `{"version":u64,"updated_at":ms\|null,"layout":any\|null}` | — |
 | `PUT /api/layout` | `{"layout":any,"client_id":s}` | 200 `{"version":u64,"updated_at":ms}` | 413 `too_large` (> 2 MiB) |
@@ -355,7 +364,7 @@ to `[A-Za-z0-9._-]`, at most 100 bytes, `upload` when empty) with mime
 Server → client JSON text frames, `type` first:
 
 - `{"type":"status", …TmuxStatus fields}` — on connect, then whenever `running`, the server
-  identity, the session list (ignoring `activity`) or a `claude_panes` count changes.
+  identity, the session list (ignoring `activity`) or a `claude_panes` or `snoozed` count changes.
 - `{"type":"layout","version":u64,"client_id":s}` — after every successful `PUT /api/layout`.
 
 Client → server frames are ignored. The server pings every 30 s. A lagging subscriber is
@@ -399,7 +408,9 @@ Vendored type definitions live outside `web/` in `vendor-types/` and are neither
 
 - Every `poll_interval`: `list_sessions` on the blocking pool. Builds `TmuxStatus`
   (`running=false`, `server=null`, `sessions=[]` on `NoServer`), fills `claude_panes` per session
-  from the latest pane scan, broadcasts `status` on change (activity ignored).
+  from the latest pane scan and `snoozed` per session from the snooze store (entries whose
+  conversation is not running in that session), broadcasts `status` on change (activity ignored).
+  A scan that sees a snoozed conversation running again in its session drops that entry.
 - Pane scan (`take_snapshot`, in memory only, nothing is written to disk) every 15 s and at the
   first poll after a structural change (session ids or window counts changed), only while
   running with ≥ 1 session. Scan errors are logged (warn), never fatal. The per-session count of
@@ -491,6 +502,13 @@ Required behaviour:
    `data-session=<name>`, not part of the ↑/↓ list) that closes the picker and opens the confirm
    dialog `kill-dialog` (Cancel `kill-cancel-btn`, Terminate `kill-confirm-btn`, error
    `kill-error`); Terminate calls `POST /api/sessions/kill` and closes every panel of that session.
+   A session with `claude_panes > 0` also has a moon button before the ✕ (`session-picker-snooze`,
+   no confirmation: it is reversible) calling `POST /api/sessions/snooze`; one with `snoozed > 0`
+   shows a `badge-snoozed` badge (`session-picker-snoozed`) and a sun button
+   (`session-picker-wake`) calling `POST /api/sessions/wake`. Neither opens the session. Toasts:
+   `Snoozed “<name>” · freed <N> MB`, `Woke “<name>”`, or the server's error message. The tab of a
+   session with `snoozed > 0` shows a moon icon (`tab-snoozed`, title "Claude is snoozed"), and the
+   terminal context menu has "Snooze Claude" (`claude_panes > 0`) and "Wake Claude" (`snoozed > 0`).
 3. **Dockview**: `defaultRenderer: 'always'`, floating groups disabled, dark theme, custom tab
    renderer: `<div data-testid="tab" data-session=<name>>` with a connection dot, the title
    (exactly the session name), a Claude badge, and a close button. Double-click on a tab toggles

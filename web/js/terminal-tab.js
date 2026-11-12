@@ -46,6 +46,8 @@ export class TerminalTab {
       hidden: true,
     });
     this.badge.append(svgIcon('claude', { size: 12 }));
+    this.snoozedMark = el('span', { class: 'tab-snoozed', testid: 'tab-snoozed', title: 'Claude is snoozed', hidden: true });
+    this.snoozedMark.append(svgIcon('moon', { size: 12 }));
     this.closeButton = el('button', {
       type: 'button',
       class: 'tab-close',
@@ -61,6 +63,7 @@ export class TerminalTab {
       this.dot,
       this.titleEl,
       this.badge,
+      this.snoozedMark,
       this.closeButton,
     );
   }
@@ -139,6 +142,9 @@ export class TerminalTab {
     const count = info?.claude_panes ?? 0;
     this.badge.hidden = count <= 0;
     this.element.dataset.claude = count > 0 ? String(count) : '0';
+    const snoozed = info?.snoozed ?? 0;
+    this.snoozedMark.hidden = snoozed <= 0;
+    this.element.dataset.snoozed = snoozed > 0 ? String(snoozed) : '0';
     this.badge.title = count > 1 ? `Claude Code is running in ${count} panes of this session` : 'Claude Code is running in this session';
   }
 

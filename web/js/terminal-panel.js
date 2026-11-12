@@ -24,6 +24,7 @@ import { debounce, el, errorMessage, plural } from './dom.js';
 import { EventHub } from './emitter.js';
 import { dragHasFiles, filesFromClipboard, filesFromDrop, pickFiles, shellQuote, uploadFiles } from './file-upload.js';
 import { PanelOverlay } from './panel-overlay.js';
+import { snoozeSession, wakeSession } from './session-actions.js';
 import { createKeyHandler } from './terminal-keys.js';
 import { createLinkHandlers } from './terminal-links.js';
 import { FONT_FAMILY, TERMINAL_THEME } from './terminal-theme.js';
@@ -612,6 +613,14 @@ export class TerminalPanel {
     const { contextMenu, workspace, picker } = this.services;
     const group = this.panelApi?.group;
     const maximized = workspace.isMaximized(this.id);
+    const info = this.services.store.session(this.session);
+    const claudeItems = [];
+    if ((info?.claude_panes ?? 0) > 0) {
+      claudeItems.push({ label: 'Snooze Claude', action: 'snooze', icon: 'moon', onSelect: () => void snoozeSession(this.services, this.session) });
+    }
+    if ((info?.snoozed ?? 0) > 0) {
+      claudeItems.push({ label: 'Wake Claude', action: 'wake', icon: 'sun', onSelect: () => void wakeSession(this.services, this.session) });
+    }
     contextMenu.open(
       { x: event.clientX, y: event.clientY },
       [
@@ -652,6 +661,7 @@ export class TerminalPanel {
           icon: 'pencil',
           onSelect: () => this.services.renameDialog.open({ panelId: this.id, session: this.session }),
         },
+        ...claudeItems,
         { label: 'Close panel', action: 'close', icon: 'close', onSelect: () => this.panelApi?.close() },
       ],
       { onClose: () => this.term?.focus() },

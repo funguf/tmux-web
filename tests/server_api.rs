@@ -363,6 +363,300 @@ async fn sessions_can_be_killed_with_200_404_and_400() {
     );
 }
 
+// ---- snooze and wake ---------------------------------------------------------------------------
+
+const CONVERSATION: &str = "3f2b8c1e-6d4a-4b7e-9a10-5c2d7e8f9a01";
+
+/// A stand-in for Claude Code: an executable shell script called `claude` in its own bin
+/// directory. It registers itself in `$CLAUDE_CONFIG_DIR/sessions/<pid>.json`, deletes that file
+/// when it gets SIGTERM, and otherwise sleeps. The real `claude` is never started.
+struct FakeClaude {
+    bin: tempfile::TempDir,
+}
+
+impl FakeClaude {
+    fn new() -> FakeClaude {
+        let bin = tempfile::tempdir().expect("temp dir");
+        let script = bin.path().join("claude");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+dir="${CLAUDE_CONFIG_DIR:?}"
+mkdir -p "$dir/sessions"
+id=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--resume" ]; then id="$2"; fi
+  shift
+done
+status=$(cat "$dir/fake-status" 2>/dev/null || echo idle)
+file="$dir/sessions/$$.json"
+printf '{"pid":%s,"sessionId":"%s","status":"%s","kind":"interactive","cwd":"%s"}' "$$" "$id" "$status" "$PWD" > "$file"
+trap 'rm -f "$file"; exit 0' TERM
+while :; do sleep 1; done
+"#,
+        )
+        .expect("write the fake claude");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        FakeClaude { bin }
+    }
+
+    /// A session whose interactive shell (the pane's root process) finds this fake first on PATH
+    /// and has `sandbox`'s config dir.
+    fn session(&self, tmux: &Tmux, sandbox: &Sandbox, name: &str) {
+        tmux.new_session(name);
+        let target = format!("={name}:");
+        let exports = format!(
+            "export PATH={}:$PATH CLAUDE_CONFIG_DIR={}",
+            self.bin.path().display(),
+            sandbox.claude_dir().display()
+        );
+        tmux.run(&["send-keys", "-t", &target, "-l", &exports]);
+        tmux.run(&["send-keys", "-t", &target, "Enter"]);
+    }
+
+    /// Types the fake into the session's shell, the way the operator starts Claude.
+    fn start(&self, tmux: &Tmux, name: &str) {
+        let line = format!(
+            "{}/claude --resume {CONVERSATION}",
+            self.bin.path().display()
+        );
+        tmux.run(&["send-keys", "-t", &format!("={name}:"), "-l", &line]);
+        tmux.run(&["send-keys", "-t", &format!("={name}:"), "Enter"]);
+    }
+}
+
+/// Pids of the fakes that registered themselves (the files in `<claude dir>/sessions`).
+fn fake_pids(sandbox: &Sandbox) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir(sandbox.claude_dir().join("sessions")) else {
+        return Vec::new();
+    };
+    let mut pids: Vec<u32> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()
+        })
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+fn session_field(status: &Value, name: &str, field: &str) -> u64 {
+    status["sessions"]
+        .as_array()
+        .and_then(|sessions| sessions.iter().find(|session| session["name"] == name))
+        .and_then(|session| session[field].as_u64())
+        .unwrap_or(u64::MAX)
+}
+
+fn snoozed_entries(sandbox: &Sandbox) -> Vec<Value> {
+    let text =
+        std::fs::read_to_string(sandbox.state_dir().join("snoozed.json")).unwrap_or_default();
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|doc| doc["entries"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claude_session_is_snoozed_and_woken_with_its_conversation() {
+    let tmux = Tmux::new();
+    let sandbox = Sandbox::new();
+    let fake = FakeClaude::new();
+    let server = TestServer::start(&tmux, &sandbox, &[]).await;
+    fake.session(&tmux, &sandbox, "work");
+    tmux.new_session("other");
+    fake.start(&tmux, "work");
+    server
+        .wait_status("one Claude pane", |status| {
+            session_field(status, "work", "claude_panes") == 1
+        })
+        .await;
+    let pids = fake_pids(&sandbox);
+    assert_eq!(pids.len(), 1, "{pids:?}");
+    let first_pid = pids[0];
+    let pane = tmux.format("work", "#{pane_id}");
+
+    let reply = server
+        .post_json("/api/sessions/snooze", &json!({"name": "work"}))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    let body = reply.json();
+    assert_eq!(body["snoozed"], 1);
+    assert!(body["freed_bytes"].as_u64().unwrap() > 0, "{body}");
+    assert!(!process_exists(first_pid), "the fake is gone");
+    assert!(
+        !sandbox
+            .claude_dir()
+            .join("sessions")
+            .join(format!("{first_pid}.json"))
+            .exists(),
+        "it was stopped with SIGTERM (its handler removed the file), not SIGKILL"
+    );
+    let status = server
+        .wait_status("snoozed", |status| {
+            session_field(status, "work", "claude_panes") == 0
+                && session_field(status, "work", "snoozed") == 1
+        })
+        .await;
+    assert_eq!(session_field(&status, "other", "snoozed"), 0);
+    assert!(tmux.has_session("work"), "the session stays");
+    let entries = snoozed_entries(&sandbox);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["session"], "work");
+    assert_eq!(entries[0]["claude_session_id"], CONVERSATION);
+    assert_eq!(entries[0]["pane_id"], pane.as_str());
+
+    // Nothing is running any more.
+    let again = server
+        .post_json("/api/sessions/snooze", &json!({"name": "work"}))
+        .await;
+    assert_eq!(
+        (again.status, again.error_code().as_str()),
+        (409, "no_claude")
+    );
+
+    let reply = server
+        .post_json("/api/sessions/wake", &json!({"name": "work"}))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json(), json!({"woken": 1}));
+    let status = server
+        .wait_status("woken", |status| {
+            session_field(status, "work", "claude_panes") == 1
+                && session_field(status, "work", "snoozed") == 0
+        })
+        .await;
+    assert_eq!(session_field(&status, "work", "windows"), 1);
+    let new_pid = *fake_pids(&sandbox).last().expect("a new fake");
+    assert_ne!(new_pid, first_pid);
+    let cmdline = std::fs::read(format!("/proc/{new_pid}/cmdline")).expect("cmdline");
+    let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+    assert!(
+        cmdline.contains(&format!("--resume {CONVERSATION}")),
+        "{cmdline}"
+    );
+    assert_eq!(tmux.format("work", "#{pane_id}"), pane, "the same pane");
+    assert!(snoozed_entries(&sandbox).is_empty());
+    let again = server
+        .post_json("/api/sessions/wake", &json!({"name": "work"}))
+        .await;
+    assert_eq!(
+        (again.status, again.error_code().as_str()),
+        (409, "not_snoozed")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claude_under_a_wrapper_root_is_not_snoozed() {
+    let tmux = Tmux::new();
+    let sandbox = Sandbox::new();
+    let fake = FakeClaude::new();
+    let server = TestServer::start(&tmux, &sandbox, &[]).await;
+    // The pane's root is `sh -c '<fake>; true'`: it ends when the fake does.
+    tmux.new_session_running(
+        "wrapped",
+        &format!(
+            "env CLAUDE_CONFIG_DIR={} sh -c '{}/claude --resume {CONVERSATION}; true'",
+            sandbox.claude_dir().display(),
+            fake.bin.path().display()
+        ),
+    );
+    server
+        .wait_status("one Claude pane", |status| {
+            session_field(status, "wrapped", "claude_panes") == 1
+        })
+        .await;
+    let pids = fake_pids(&sandbox);
+    assert_eq!(pids.len(), 1, "{pids:?}");
+
+    let reply = server
+        .post_json("/api/sessions/snooze", &json!({"name": "wrapped"}))
+        .await;
+    assert_eq!(
+        (reply.status, reply.error_code().as_str()),
+        (409, "not_in_shell")
+    );
+    assert!(process_exists(pids[0]), "the fake is still running");
+    assert!(tmux.has_session("wrapped"));
+    assert!(snoozed_entries(&sandbox).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replying_claude_is_not_snoozed() {
+    let tmux = Tmux::new();
+    let sandbox = Sandbox::new();
+    let fake = FakeClaude::new();
+    std::fs::create_dir_all(sandbox.claude_dir()).expect("claude dir");
+    std::fs::write(sandbox.claude_dir().join("fake-status"), "busy").expect("status");
+    let server = TestServer::start(&tmux, &sandbox, &[]).await;
+    fake.session(&tmux, &sandbox, "work");
+    fake.start(&tmux, "work");
+    server
+        .wait_status("one Claude pane", |status| {
+            session_field(status, "work", "claude_panes") == 1
+        })
+        .await;
+    let pids = fake_pids(&sandbox);
+
+    let reply = server
+        .post_json("/api/sessions/snooze", &json!({"name": "work"}))
+        .await;
+    assert_eq!((reply.status, reply.error_code().as_str()), (409, "busy"));
+    assert!(pids.iter().all(|pid| process_exists(*pid)), "still running");
+    assert!(snoozed_entries(&sandbox).is_empty());
+    assert_eq!(fake_pids(&sandbox), pids);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn waking_waits_for_a_free_shell_and_killing_forgets_the_snooze() {
+    let tmux = Tmux::new();
+    let sandbox = Sandbox::new();
+    let fake = FakeClaude::new();
+    let server = TestServer::start(&tmux, &sandbox, &[]).await;
+    fake.session(&tmux, &sandbox, "work");
+    fake.start(&tmux, "work");
+    server
+        .wait_status("one Claude pane", |status| {
+            session_field(status, "work", "claude_panes") == 1
+        })
+        .await;
+    let reply = server
+        .post_json("/api/sessions/snooze", &json!({"name": "work"}))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+
+    // Something else now occupies the pane.
+    tmux.run(&["send-keys", "-t", "=work:", "-l", "sleep 100"]);
+    tmux.run(&["send-keys", "-t", "=work:", "Enter"]);
+    eventually("sleep in the pane", WITHIN, || async {
+        (tmux.format("work", "#{pane_current_command}") == "sleep").then_some(())
+    })
+    .await;
+    let reply = server
+        .post_json("/api/sessions/wake", &json!({"name": "work"}))
+        .await;
+    assert_eq!(
+        (reply.status, reply.error_code().as_str()),
+        (409, "pane_busy")
+    );
+    assert_eq!(snoozed_entries(&sandbox).len(), 1, "still remembered");
+    assert!(fake_pids(&sandbox).is_empty(), "nothing was typed");
+
+    let reply = server
+        .post_json("/api/sessions/kill", &json!({"name": "work"}))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert!(
+        snoozed_entries(&sandbox).is_empty(),
+        "the entry went with the session"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sessions_scroll_through_tmux_history_without_typing_into_the_pane() {
     let tmux = Tmux::new();

@@ -25,6 +25,12 @@ pub struct ClaudeSnap {
     pub kind: Option<String>,
     pub name: Option<String>,
     pub source: ClaudeIdSource,
+    /// "busy" while Claude is replying, else "idle", "waiting", … from the sessions file
+    #[serde(default)]
+    pub status: Option<String>,
+    /// The `CLAUDE_CONFIG_DIR` the process was started with (absolute); None when it has none
+    #[serde(default)]
+    pub config_dir: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,8 +91,12 @@ impl ClaudeDetector {
             cwd,
             args,
             kind: file.as_ref().and_then(|f| f.kind.clone()),
+            status: file.as_ref().and_then(|f| f.status.clone()),
             name: file.and_then(|f| f.name),
             source,
+            config_dir: self
+                .environ_config_dir(pid)
+                .map(|dir| dir.to_string_lossy().into_owned()),
         })
     }
 
@@ -102,16 +112,21 @@ impl ClaudeDetector {
     }
 
     fn config_dir_of(&self, pid: u32) -> PathBuf {
-        let from_environ = procscan::read_environ_var(&self.proc_root, pid, "CLAUDE_CONFIG_DIR")
+        self.environ_config_dir(pid)
+            .unwrap_or_else(|| self.config_dir.clone())
+    }
+
+    /// The `CLAUDE_CONFIG_DIR` of the process's own environment, made absolute; None when the
+    /// process has none (or it cannot be resolved).
+    fn environ_config_dir(&self, pid: u32) -> Option<PathBuf> {
+        let dir = procscan::read_environ_var(&self.proc_root, pid, "CLAUDE_CONFIG_DIR")
             .filter(|dir| !dir.is_empty())
-            .map(PathBuf::from);
-        match from_environ {
-            Some(dir) if dir.is_absolute() => dir,
-            // A relative directory is relative to where the process runs.
-            Some(dir) => procscan::read_cwd(&self.proc_root, pid)
-                .map_or_else(|| self.config_dir.clone(), |cwd| cwd.join(dir)),
-            None => self.config_dir.clone(),
+            .map(PathBuf::from)?;
+        if dir.is_absolute() {
+            return Some(dir);
         }
+        // A relative directory is relative to where the process runs.
+        procscan::read_cwd(&self.proc_root, pid).map(|cwd| cwd.join(dir))
     }
 }
 
@@ -122,6 +137,7 @@ struct SessionFile {
     cwd: Option<String>,
     kind: Option<String>,
     name: Option<String>,
+    status: Option<String>,
 }
 
 fn read_small_text(path: &Path) -> Option<String> {
@@ -161,6 +177,7 @@ fn parse_sessions_file(text: &str, start_ticks: u64) -> Option<SessionFile> {
         cwd: text_of("cwd"),
         kind: text_of("kind"),
         name: text_of("name"),
+        status: text_of("status"),
     })
 }
 
@@ -264,6 +281,8 @@ mod tests {
             kind: Some("interactive".to_string()),
             name: None,
             source: ClaudeIdSource::SessionsFile,
+            status: None,
+            config_dir: None,
         }
     }
 
@@ -616,6 +635,8 @@ mod tests {
                 kind: Some("interactive".to_string()),
                 name: Some("u-fb".to_string()),
                 source: ClaudeIdSource::SessionsFile,
+                status: Some("busy".to_string()),
+                config_dir: None,
             }
         );
     }
@@ -809,6 +830,11 @@ mod tests {
 
         assert_eq!(found.session_id.as_deref(), Some(SESSION));
         assert_eq!(found.cwd, "/from-env-dir");
+        assert_eq!(
+            found.config_dir.as_deref(),
+            other_dir.to_str(),
+            "the directory from the environment is remembered"
+        );
     }
 
     #[test]
@@ -825,6 +851,7 @@ mod tests {
             let found = machine.detector().detect(&table(&[&claude]), 200).unwrap();
             assert_eq!(found.session_id.as_deref(), Some(SESSION), "{environ:?}");
             assert_eq!(found.cwd, "/default", "{environ:?}");
+            assert_eq!(found.config_dir, None, "{environ:?}");
         }
         // A process whose environ cannot be read at all behaves the same.
         let unreadable = machine.process(201, 1, "claude", &["claude"]);
@@ -855,6 +882,10 @@ mod tests {
         );
         let found = machine.detector().detect(&table(&[&claude]), 200).unwrap();
         assert_eq!(found.session_id.as_deref(), Some(SESSION));
+        assert_eq!(
+            found.config_dir.as_deref(),
+            work.join("rel-config").to_str()
+        );
     }
 
     #[test]

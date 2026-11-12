@@ -26,6 +26,10 @@ that runs Claude Code.
   its tab flashes orange until you focus that panel.
 - **Terminate sessions.** The session picker has a red cross on each row that kills that tmux
   session after a confirmation and closes its panels.
+- **Snooze Claude.** A moon button on a session row (or "Snooze Claude" in the terminal menu) stops
+  the Claude Code processes of that session to free memory but remembers their conversations; the
+  tmux session and its shell stay. The sun button / "Wake Claude" types `claude … --resume <id>`
+  back into the same panes. A Claude that is mid-reply is not snoozed.
 - **Crash recovery is left to tmux itself**, for example tmux-resurrect and tmux-continuum;
   tmux-web keeps no snapshots and restores nothing.
 

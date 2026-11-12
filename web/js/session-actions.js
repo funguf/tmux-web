@@ -4,6 +4,40 @@
 import { errorMessage, validateSessionName } from './dom.js';
 import { toast } from './toast.js';
 
+const BYTES_PER_MB = 1024 * 1024;
+
+/**
+ * Stop Claude in a session and remember its conversations (POST api/sessions/snooze).
+ * Shows a toast either way.
+ *
+ * @param {{api: any}} services
+ * @param {string} name
+ */
+export async function snoozeSession({ api }, name) {
+  try {
+    const result = await api.snoozeSession(name);
+    const megabytes = Math.round((result?.freed_bytes ?? 0) / BYTES_PER_MB);
+    toast.success(`Snoozed \u201c${name}\u201d \u00b7 freed ${megabytes} MB`);
+  } catch (err) {
+    toast.error(errorMessage(err));
+  }
+}
+
+/**
+ * Reopen the snoozed conversations of a session (POST api/sessions/wake).
+ *
+ * @param {{api: any}} services
+ * @param {string} name
+ */
+export async function wakeSession({ api }, name) {
+  try {
+    await api.wakeSession(name);
+    toast.success(`Woke \u201c${name}\u201d`);
+  } catch (err) {
+    toast.error(errorMessage(err));
+  }
+}
+
 /**
  * Create a tmux session (POST /api/sessions) and open it in a panel.
  * An already existing session is simply opened.

@@ -7,10 +7,11 @@
 
 use crate::claude::ClaudeDetector;
 use crate::snapshot::{self, Snapshot};
+use crate::snooze::SnoozeStore;
 use crate::tmux::{self, ServerIdentity, SessionInfo, TmuxError, TmuxRunner};
 use crate::util;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
@@ -87,6 +88,7 @@ impl TmuxStatus {
                     && a.created == b.created
                     && a.group == b.group
                     && a.claude_panes == b.claude_panes
+                    && a.snoozed == b.snoozed
             })
     }
 }
@@ -116,6 +118,8 @@ fn frame_json(frame: &Frame<'_>) -> Arc<str> {
 struct ClaudeCounts {
     server_id: String,
     by_session: HashMap<String, u32>,
+    /// Conversation ids of the Claude processes running now, per session NAME.
+    running: HashMap<String, HashSet<String>>,
 }
 
 impl ClaudeCounts {
@@ -133,9 +137,34 @@ impl ClaudeCounts {
                 (session.id.clone(), u32::try_from(panes).unwrap_or(u32::MAX))
             })
             .collect();
+        let running = snapshot
+            .sessions
+            .iter()
+            .map(|session| (session.name.clone(), Self::running_ids(session)))
+            .collect();
         Self {
             server_id: snapshot.server.id(),
             by_session,
+            running,
+        }
+    }
+
+    fn running_ids(session: &snapshot::SessionSnap) -> HashSet<String> {
+        session
+            .windows
+            .iter()
+            .flat_map(|window| &window.panes)
+            .filter_map(|pane| pane.claude.as_ref()?.session_id.clone())
+            .collect()
+    }
+
+    /// The conversations running in the session called `name` (empty for another server).
+    fn running_in(&self, server: Option<&ServerIdentity>, name: &str) -> HashSet<String> {
+        match server {
+            Some(server) if server.id() == self.server_id => {
+                self.running.get(name).cloned().unwrap_or_default()
+            }
+            _ => HashSet::new(),
         }
     }
 
@@ -180,6 +209,7 @@ struct Inner {
     runner: Arc<dyn TmuxRunner>,
     detector: ClaudeDetector,
     scan: Arc<SnapshotFn>,
+    snooze: Arc<SnoozeStore>,
     events: broadcast::Sender<Arc<str>>,
     state: Mutex<State>,
     poll: AsyncMutex<PollState>,
@@ -204,11 +234,13 @@ impl Monitor {
         runner: Arc<dyn TmuxRunner>,
         detector: ClaudeDetector,
         settings: MonitorSettings,
+        snooze: Arc<SnoozeStore>,
     ) -> Monitor {
         Monitor::with_snapshot_fn(
             runner,
             detector,
             settings,
+            snooze,
             Arc::new(|runner: &dyn TmuxRunner, detector: &ClaudeDetector| {
                 snapshot::take_snapshot(runner, detector)
             }),
@@ -219,6 +251,7 @@ impl Monitor {
         runner: Arc<dyn TmuxRunner>,
         detector: ClaudeDetector,
         settings: MonitorSettings,
+        snooze: Arc<SnoozeStore>,
         scan: Arc<SnapshotFn>,
     ) -> Monitor {
         let status = TmuxStatus::stopped();
@@ -233,6 +266,7 @@ impl Monitor {
                 runner,
                 detector,
                 scan,
+                snooze,
                 events: broadcast::channel(EVENT_CAPACITY).0,
                 state: Mutex::new(state),
                 poll: AsyncMutex::new(PollState::default()),
@@ -293,6 +327,29 @@ impl Monitor {
             .is_some_and(|finished| finished.elapsed() < max_age);
         if !fresh_enough {
             self.poll_locked(&mut poll).await;
+        }
+        self.status()
+    }
+
+    /// A fresh snapshot of every pane, outside the polling cycle (the same scan the monitor uses).
+    pub async fn snapshot(&self) -> Result<Snapshot, TmuxError> {
+        let runner = Arc::clone(&self.inner.runner);
+        let detector = self.inner.detector.clone();
+        let scan = Arc::clone(&self.inner.scan);
+        blocking(move || scan(&*runner, &detector))
+            .await
+            .map_err(|err| TmuxError::Command(err.to_string()))?
+    }
+
+    /// Polls and rescans the panes now, so that Claude counts and snoozed counts are current.
+    pub async fn refresh_with_scan(&self) -> TmuxStatus {
+        let mut poll = self.inner.poll.lock().await;
+        self.poll_locked(&mut poll).await;
+        if self.status().running {
+            poll.last_scan_attempt = Some(Instant::now());
+            if let Err(err) = self.scan_panes().await {
+                self.warn_throttled(&mut poll, format!("pane scan failed: {err}"));
+            }
         }
         self.status()
     }
@@ -374,6 +431,8 @@ impl Monitor {
         let mut state = self.state();
         for session in &mut sessions {
             session.claude_panes = state.claude.for_session(server.as_ref(), session);
+            let running = state.claude.running_in(server.as_ref(), &session.name);
+            session.snoozed = self.inner.snooze.snoozed_count(&session.name, &running);
         }
         let status = TmuxStatus {
             running,
@@ -414,17 +473,15 @@ impl Monitor {
         let snapshot = blocking(move || scan(&*runner, &detector)).await??;
 
         let counts = ClaudeCounts::from_snapshot(&snapshot);
-        let counts_changed = {
-            let mut state = self.state();
-            let changed = state.claude != counts;
-            if changed {
-                state.claude = counts;
+        // A conversation seen running again was resumed by hand: it is not snoozed any more.
+        for (name, running) in &counts.running {
+            if let Err(err) = self.inner.snooze.drop_running(name, running) {
+                tracing::warn!(%err, "could not update the snooze store");
             }
-            changed
-        };
-        if counts_changed {
-            self.republish_cached();
         }
+        self.state().claude = counts;
+        // Always: the store pass above may have changed the snoozed counts too.
+        self.republish_cached();
         Ok(())
     }
 }
@@ -525,6 +582,8 @@ mod tests {
             kind: Some("interactive".into()),
             name: None,
             source: ClaudeIdSource::SessionsFile,
+            status: None,
+            config_dir: None,
         }
     }
 
@@ -603,6 +662,7 @@ mod tests {
             tmux.clone(),
             ClaudeDetector::new(dir.path().join("claude")),
             settings,
+            Arc::new(SnoozeStore::open(dir.path())),
             Arc::new(move |_: &dyn TmuxRunner, _: &ClaudeDetector| {
                 taken2.fetch_add(1, Ordering::SeqCst);
                 next2

@@ -7,14 +7,16 @@
  *  - mode "split": the chosen session goes into a new group right of / below
  *                  `referenceGroup` (an already open session is moved there).
  *
- * Each row has a red ✕ that opens the kill dialog (terminate the tmux session).
+ * Each row has a red ✕ that opens the kill dialog (terminate the tmux session). A session
+ * running Claude also has a moon button (snooze: stop Claude, keep its conversations); a
+ * session with snoozed conversations shows a "snoozed" badge and a sun button (wake).
  *
  * Keyboard: Up / Down move the highlight, Enter opens it, Escape closes.
  */
 import { clear, el, plural } from './dom.js';
 import { svgIcon } from './icons.js';
 import { Popover } from './popover.js';
-import { createAndOpenSession } from './session-actions.js';
+import { createAndOpenSession, snoozeSession, wakeSession } from './session-actions.js';
 
 export class SessionPicker {
   /**
@@ -191,6 +193,9 @@ export class SessionPicker {
         item.append(badge);
       }
       if (isOpen) item.append(el('span', { class: 'badge badge-open', testid: 'session-picker-open', text: 'open' }));
+      if ((session.snoozed ?? 0) > 0) {
+        item.append(el('span', { class: 'badge badge-snoozed', testid: 'session-picker-snoozed', text: 'snoozed' }));
+      }
       const kill = el('button', {
         type: 'button',
         class: 'picker-kill',
@@ -201,7 +206,10 @@ export class SessionPicker {
         on: { click: () => this.#confirmKill(session) },
       });
       kill.append(svgIcon('close', { size: 12 }));
-      row.append(item, kill);
+      row.append(item);
+      if ((session.claude_panes ?? 0) > 0) row.append(this.#rowButton('snooze', 'moon', `Snooze Claude in \u201c${session.name}\u201d to free memory`, session, snoozeSession));
+      if ((session.snoozed ?? 0) > 0) row.append(this.#rowButton('wake', 'sun', `Wake Claude in \u201c${session.name}\u201d`, session, wakeSession));
+      row.append(kill);
       this.list.append(row);
     });
 
@@ -210,6 +218,28 @@ export class SessionPicker {
     this.openAllButton.disabled = notOpen.length === 0;
     this.openAllButton.hidden = this.mode === 'split';
     this.popover.reposition();
+  }
+
+  /** A small icon button on a row; it acts on the session without opening it. */
+  #rowButton(kind, icon, title, session, action) {
+    const button = el('button', {
+      type: 'button',
+      class: `picker-${kind}`,
+      testid: `session-picker-${kind}`,
+      title,
+      'aria-label': title,
+      data: { session: session.name },
+      on: {
+        click: () => {
+          button.disabled = true;
+          void action(this.services, session.name).finally(() => {
+            button.disabled = false;
+          });
+        },
+      },
+    });
+    button.append(svgIcon(icon, { size: 13 }));
+    return button;
   }
 
   #setHighlight(index) {

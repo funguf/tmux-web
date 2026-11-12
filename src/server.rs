@@ -13,6 +13,7 @@ use crate::monitor::{
 };
 use crate::pty::{self, AttachContext, AttachRegistry};
 use crate::security::{self, Security};
+use crate::snooze::{self, SnoozeStore, StopOutcome, StopTimings};
 use crate::tmux::{self, RealTmux, TmuxError, TmuxRunner};
 use crate::upload::{UploadError, UploadStore, SWEEP_INTERVAL};
 use crate::util;
@@ -183,6 +184,7 @@ pub struct Shared {
     pub runner: Arc<dyn TmuxRunner>,
     pub monitor: Monitor,
     pub layout: Arc<LayoutStore>,
+    pub snooze: Arc<SnoozeStore>,
     pub uploads: Arc<UploadStore>,
     pub security: Arc<Security>,
     pub attach: Arc<AttachRegistry>,
@@ -218,6 +220,17 @@ impl AppState {
         runner: Arc<dyn TmuxRunner>,
         shutdown: watch::Receiver<bool>,
     ) -> anyhow::Result<AppState> {
+        AppState::with_scan(config, runner, shutdown, None)
+    }
+
+    /// Like [`AppState::with_runner`], with a replacement for the pane scan (the tests use it to
+    /// describe Claude panes without a real process).
+    pub fn with_scan(
+        config: Config,
+        runner: Arc<dyn TmuxRunner>,
+        shutdown: watch::Receiver<bool>,
+        scan: Option<Arc<crate::monitor::SnapshotFn>>,
+    ) -> anyhow::Result<AppState> {
         util::ensure_private_dir(&config.state_dir)
             .with_context(|| format!("creating state directory {}", config.state_dir.display()))?;
         let hostname = machine_hostname();
@@ -229,13 +242,21 @@ impl AppState {
             config.upload_retention,
         )
         .with_context(|| format!("opening {}", config.uploads_dir().display()))?;
-        let monitor = Monitor::new(
-            Arc::clone(&runner),
-            ClaudeDetector::new(config.claude_config_dir.clone()),
-            MonitorSettings {
-                poll_interval: config.poll_interval,
-            },
-        );
+        let snooze = Arc::new(SnoozeStore::open(&config.state_dir));
+        let detector = ClaudeDetector::new(config.claude_config_dir.clone());
+        let settings = MonitorSettings {
+            poll_interval: config.poll_interval,
+        };
+        let monitor = match scan {
+            Some(scan) => Monitor::with_snapshot_fn(
+                Arc::clone(&runner),
+                detector,
+                settings,
+                Arc::clone(&snooze),
+                scan,
+            ),
+            None => Monitor::new(Arc::clone(&runner), detector, settings, Arc::clone(&snooze)),
+        };
         let security = admission_policy(&config, &hostname);
         Ok(AppState(Arc::new(Shared {
             config,
@@ -243,6 +264,7 @@ impl AppState {
             runner,
             monitor,
             layout: Arc::new(layout),
+            snooze,
             uploads: Arc::new(uploads),
             security: Arc::new(security),
             attach: Arc::new(AttachRegistry::default()),
@@ -279,6 +301,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/rename", post(rename_session))
         .route("/api/sessions/kill", post(kill_session))
+        .route("/api/sessions/snooze", post(snooze_session))
+        .route("/api/sessions/wake", post(wake_session))
         .route("/api/sessions/scroll", post(scroll_session))
         .route("/api/layout", get(get_layout).put(put_layout))
         .route("/api/upload", post(upload))
@@ -521,6 +545,7 @@ async fn rename_session(State(app): State<AppState>, request: Request) -> ApiRes
             ),
             other => ApiError::tmux(&other),
         })?;
+    forget_on_failure(app.snooze.rename_session(&body.name, &body.new_name));
     app.monitor.refresh(Duration::ZERO).await;
     Ok(Json(json!({"name": body.new_name})))
 }
@@ -552,8 +577,161 @@ async fn kill_session(State(app): State<AppState>, request: Request) -> ApiResul
             ),
             other => ApiError::tmux(&other),
         })?;
+    forget_on_failure(app.snooze.remove_session(&body.name));
     app.monitor.refresh(Duration::ZERO).await;
     Ok(Json(json!({"killed": body.name})))
+}
+
+/// The store is a convenience on top of a change that already happened: a failed save is
+/// logged, not turned into an error for the operator.
+fn forget_on_failure(saved: std::io::Result<()>) {
+    if let Err(err) = saved {
+        tracing::warn!(%err, "could not save the snooze store");
+    }
+}
+
+#[derive(Deserialize)]
+struct SessionName {
+    name: String,
+}
+
+fn refusal_error(refusal: &snooze::Refusal) -> ApiError {
+    let status = if refusal.is_not_found() {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::CONFLICT
+    };
+    ApiError::new(status, refusal.code(), refusal.message())
+}
+
+/// A fresh snapshot of the panes; an unknown session and a missing server are told apart.
+async fn fresh_snapshot(app: &AppState, name: &str) -> ApiResult<crate::snapshot::Snapshot> {
+    app.monitor.snapshot().await.map_err(|err| match err {
+        TmuxError::NoServer => ApiError::tmux(&TmuxError::NoServer),
+        // A server without sessions: nothing of that name either.
+        TmuxError::Command(message) if message == "no sessions" => ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("no session named {name:?}"),
+        ),
+        other => ApiError::tmux(&other),
+    })
+}
+
+/// `POST /api/sessions/snooze {"name"}`: stop the Claude processes of the session and remember
+/// their conversations. Refuses the whole request, touching nothing, when any of them cannot be
+/// resumed (no conversation id), is replying, or is the pane's own process.
+async fn snooze_session(State(app): State<AppState>, request: Request) -> ApiResult<Json<Value>> {
+    let body: SessionName = json_body(request).await?;
+    if body.name.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "the session name must not be empty",
+        ));
+    }
+    let snapshot = fresh_snapshot(&app, &body.name).await?;
+    let proc_root = PathBuf::from("/proc");
+    let targets = snooze::plan_snooze(&snapshot, &body.name, util::now_ms(), &|pid| {
+        crate::procscan::read_cmdline(&proc_root, pid)
+    })
+    .map_err(|refusal| refusal_error(&refusal))?;
+    let entries: Vec<_> = targets.iter().map(|target| target.entry.clone()).collect();
+    let store = Arc::clone(&app.snooze);
+    // Remember first: if stopping fails half way, the conversations are still known.
+    app.snooze.mark_stopping(&entries);
+    let saved = app.snooze.add(entries.clone());
+    let stopped = match saved {
+        Ok(()) => blocking(move || stop_targets(&proc_root, &targets)).await,
+        Err(err) => {
+            store.clear_stopping(&entries);
+            return Err(ApiError::internal(format!(
+                "could not save the snoozed conversations: {err}"
+            )));
+        }
+    };
+    store.clear_stopping(&entries);
+    let (snoozed, freed_bytes) = stopped??;
+    app.monitor.refresh_with_scan().await;
+    Ok(Json(
+        json!({"snoozed": snoozed, "freed_bytes": freed_bytes}),
+    ))
+}
+
+/// Stops every target; `(processes handled, bytes freed)`. Only pids that are Claude processes
+/// below the pane's shell are ever signalled.
+fn stop_targets(
+    proc_root: &std::path::Path,
+    targets: &[snooze::SnoozeTarget],
+) -> ApiResult<(usize, u64)> {
+    // The processes of each pane are looked up now, right before signalling.
+    let table = crate::procscan::ProcTable::scan(proc_root)
+        .map_err(|err| ApiError::internal(format!("cannot scan the processes: {err}")))?;
+    let mut freed = 0u64;
+    let mut stuck = false;
+    for target in targets {
+        let below_pane = table
+            .descendants(target.pane_pid)
+            .contains(&target.claude_pid);
+        let ticks = snooze::claude_start_ticks(proc_root, target.claude_pid);
+        let outcome = match (below_pane, ticks) {
+            (true, Some(ticks)) => {
+                snooze::stop_process(proc_root, target.claude_pid, ticks, StopTimings::default())
+            }
+            _ => StopOutcome::Skipped,
+        };
+        match outcome {
+            StopOutcome::Stopped { freed_bytes } => freed = freed.saturating_add(freed_bytes),
+            StopOutcome::Skipped => {}
+            StopOutcome::Stuck => stuck = true,
+        }
+    }
+    if stuck {
+        return Err(ApiError::internal(
+            "Claude did not stop; its conversation is remembered but the process is still running",
+        ));
+    }
+    Ok((targets.len(), freed))
+}
+
+/// `POST /api/sessions/wake {"name"}`: type `claude … --resume <id>` into each snoozed pane.
+async fn wake_session(State(app): State<AppState>, request: Request) -> ApiResult<Json<Value>> {
+    let body: SessionName = json_body(request).await?;
+    if body.name.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "the session name must not be empty",
+        ));
+    }
+    let entries = app.snooze.entries_for(&body.name);
+    if entries.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "not_snoozed",
+            format!("nothing is snoozed in {:?}", body.name),
+        ));
+    }
+    let snapshot = fresh_snapshot(&app, &body.name).await?;
+    let plan = snooze::plan_wake(&snapshot, &body.name, &entries)
+        .map_err(|refusal| refusal_error(&refusal))?;
+    let runner = Arc::clone(&app.runner);
+    let typed = blocking(move || -> Result<(), TmuxError> {
+        for (pane_id, command) in &plan {
+            tmux::send_text(&*runner, pane_id, command)?;
+            tmux::send_enter(&*runner, pane_id)?;
+        }
+        Ok(())
+    })
+    .await?;
+    typed.map_err(|err| ApiError::tmux(&err))?;
+    let ids: Vec<String> = entries
+        .iter()
+        .map(|entry| entry.claude_session_id.clone())
+        .collect();
+    forget_on_failure(app.snooze.remove_for(&body.name, &ids));
+    app.monitor.refresh_with_scan().await;
+    Ok(Json(json!({"woken": entries.len()})))
 }
 
 #[derive(Deserialize)]
@@ -987,6 +1165,8 @@ mod tests {
     struct FakeTmux {
         sessions: Mutex<Option<Vec<(String, String)>>>, // None = no server
         next_id: AtomicUsize,
+        /// Every `send-keys` argv received.
+        sent: Mutex<Vec<Vec<String>>>,
     }
 
     impl FakeTmux {
@@ -1057,6 +1237,10 @@ mod tests {
                         None => Err(TmuxError::Command(format!("can't find session: {name}"))),
                     }
                 }
+                "send-keys" => {
+                    self.sent.lock().unwrap().push(args.to_vec());
+                    Ok(String::new())
+                }
                 // Snapshots (once core is real) ask for windows and panes too; a refusal is
                 // only logged by the monitor, which is all these API tests need from it.
                 other => Err(TmuxError::Command(format!("the fake tmux has no {other}"))),
@@ -1072,6 +1256,14 @@ mod tests {
     }
 
     fn harness_with(tmux: Arc<dyn TmuxRunner>, extra_args: &[&str]) -> Harness {
+        harness_full(tmux, extra_args, None)
+    }
+
+    fn harness_full(
+        tmux: Arc<dyn TmuxRunner>,
+        extra_args: &[&str],
+        scan: Option<Arc<crate::monitor::SnapshotFn>>,
+    ) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state");
         let claude_dir = dir.path().join("claude");
@@ -1091,7 +1283,7 @@ mod tests {
         let cli = Cli::try_parse_args(args).unwrap();
         let config = Config::from_cli(&cli).unwrap();
         let (stop, stop_rx) = watch::channel(false);
-        let state = AppState::with_runner(config, tmux, stop_rx).unwrap();
+        let state = AppState::with_scan(config, tmux, stop_rx, scan).unwrap();
         Harness {
             app: router(state.clone()),
             state,
@@ -1431,6 +1623,250 @@ mod tests {
             (reply.status, error_code(&reply).as_str()),
             (StatusCode::SERVICE_UNAVAILABLE, "no_server")
         );
+    }
+
+    // ---- snooze and wake -------------------------------------------------------------------------
+
+    const CONVERSATION: &str = "a6967ea6-b23c-4d6a-8dee-914e0050be69";
+
+    /// The panes of session "alpha" in the faked scan: (pane id, pane pid, command, claude).
+    type FakePanes = Arc<Mutex<Vec<crate::snapshot::PaneSnap>>>;
+
+    fn fake_pane(
+        id: &str,
+        pid: u32,
+        command: &str,
+        claude: Option<(u32, Option<&str>, Option<&str>)>,
+    ) -> crate::snapshot::PaneSnap {
+        crate::snapshot::PaneSnap {
+            id: id.into(),
+            index: 0,
+            active: true,
+            pid,
+            cwd: "/w".into(),
+            current_command: command.into(),
+            foreground_cmdline: None,
+            claude: claude.map(
+                |(claude_pid, session_id, status)| crate::claude::ClaudeSnap {
+                    pid: claude_pid,
+                    session_id: session_id.map(str::to_string),
+                    cwd: "/w".into(),
+                    args: vec!["--resume".into(), CONVERSATION.into()],
+                    kind: None,
+                    name: None,
+                    source: crate::claude::ClaudeIdSource::SessionsFile,
+                    status: status.map(str::to_string),
+                    config_dir: None,
+                },
+            ),
+        }
+    }
+
+    /// A harness whose pane scan reports `panes` as the only window of session "alpha".
+    fn snooze_harness(
+        panes: Vec<crate::snapshot::PaneSnap>,
+    ) -> (Harness, Arc<FakeTmux>, FakePanes) {
+        let tmux = FakeTmux::with_sessions(&["alpha", "beta"]);
+        let panes: FakePanes = Arc::new(Mutex::new(panes));
+        let shared = Arc::clone(&panes);
+        let scan: Arc<crate::monitor::SnapshotFn> = Arc::new(move |_, _| {
+            let session = |id: &str, name: &str, panes: Vec<crate::snapshot::PaneSnap>| {
+                crate::snapshot::SessionSnap {
+                    id: id.into(),
+                    name: name.into(),
+                    created: 1,
+                    group: None,
+                    windows: vec![crate::snapshot::WindowSnap {
+                        id: "@1".into(),
+                        index: 0,
+                        name: "w".into(),
+                        automatic_rename: false,
+                        active: true,
+                        zoomed: false,
+                        width: 80,
+                        height: 24,
+                        layout: String::new(),
+                        panes,
+                    }],
+                }
+            };
+            Ok(crate::snapshot::Snapshot {
+                version: crate::snapshot::SNAPSHOT_VERSION,
+                taken_at: 1,
+                server: tmux::ServerIdentity {
+                    pid: 77,
+                    start_time: 1_700_000_000,
+                    socket_path: "/tmp/fake".into(),
+                    version: "3.4".into(),
+                },
+                sessions: vec![
+                    session("$0", "alpha", shared.lock().unwrap().clone()),
+                    session("$1", "beta", vec![fake_pane("%9", 900, "bash", None)]),
+                ],
+            })
+        });
+        let h = harness_full(tmux.clone(), &[], Some(scan));
+        (h, tmux, panes)
+    }
+
+    fn remember(h: &Harness, session: &str, pane_id: &str) {
+        h.state
+            .snooze
+            .add(vec![snooze::SnoozeEntry {
+                session: session.into(),
+                pane_id: pane_id.into(),
+                window_index: 0,
+                pane_index: 0,
+                claude_session_id: CONVERSATION.into(),
+                cwd: "/w".into(),
+                args: vec!["--verbose".into()],
+                config_dir: None,
+                snoozed_at: 1,
+            }])
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn snoozing_is_refused_without_touching_anything() {
+        let cases: Vec<(Vec<crate::snapshot::PaneSnap>, &str, &str)> = vec![
+            (
+                vec![fake_pane("%1", 100, "bash", None)],
+                "alpha",
+                "no_claude",
+            ),
+            (
+                // pid 1 is not a Claude process: a refusal must never reach the signalling.
+                vec![fake_pane(
+                    "%1",
+                    100,
+                    "claude",
+                    Some((1, Some(CONVERSATION), Some("busy"))),
+                )],
+                "alpha",
+                "busy",
+            ),
+            (
+                vec![fake_pane(
+                    "%1",
+                    100,
+                    "claude",
+                    Some((1, None, Some("idle"))),
+                )],
+                "alpha",
+                "no_session_id",
+            ),
+            (
+                vec![fake_pane(
+                    "%1",
+                    1,
+                    "claude",
+                    Some((1, Some(CONVERSATION), Some("idle"))),
+                )],
+                "alpha",
+                "not_in_shell",
+            ),
+        ];
+        for (panes, name, code) in cases {
+            let (h, tmux, _) = snooze_harness(panes);
+            let reply = post_json(&h, "/api/sessions/snooze", json!({"name": name})).await;
+            assert_eq!(
+                (reply.status, error_code(&reply).as_str()),
+                (StatusCode::CONFLICT, code)
+            );
+            assert!(h.state.snooze.entries_for("alpha").is_empty(), "{code}");
+            assert!(tmux.sent.lock().unwrap().is_empty());
+        }
+        let (h, _, _) = snooze_harness(vec![fake_pane("%1", 100, "bash", None)]);
+        let reply = post_json(&h, "/api/sessions/snooze", json!({"name": "ghost"})).await;
+        assert_eq!(
+            (reply.status, error_code(&reply).as_str()),
+            (StatusCode::NOT_FOUND, "not_found")
+        );
+        let reply = post_json(&h, "/api/sessions/snooze", json!({"name": ""})).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        let reply = post_json(&h, "/api/sessions/wake", json!({"name": "alpha"})).await;
+        assert_eq!(
+            (reply.status, error_code(&reply).as_str()),
+            (StatusCode::CONFLICT, "not_snoozed")
+        );
+    }
+
+    #[tokio::test]
+    async fn waking_types_the_resume_command_into_the_pane() {
+        let (h, tmux, _) = snooze_harness(vec![fake_pane("%1", 100, "bash", None)]);
+        remember(&h, "alpha", "%1");
+        let status = get_json(&h, "/api/status").await.json();
+        assert_eq!(status["sessions"][0]["snoozed"], 1);
+        assert_eq!(status["sessions"][1]["snoozed"], 0);
+
+        let reply = post_json(&h, "/api/sessions/wake", json!({"name": "alpha"})).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json(), json!({"woken": 1}));
+        let sent = tmux.sent.lock().unwrap().clone();
+        let typed = format!("cd /w && claude --verbose --resume {CONVERSATION}");
+        assert_eq!(
+            sent,
+            vec![
+                vec!["send-keys", "-t", "%1", "-l", typed.as_str()],
+                vec!["send-keys", "-t", "%1", "Enter"],
+            ]
+        );
+        assert!(h.state.snooze.entries_for("alpha").is_empty());
+        let status = get_json(&h, "/api/status").await.json();
+        assert_eq!(status["sessions"][0]["snoozed"], 0);
+    }
+
+    #[tokio::test]
+    async fn waking_needs_a_free_shell_and_a_known_session() {
+        let (h, tmux, panes) = snooze_harness(vec![fake_pane("%1", 100, "sleep", None)]);
+        remember(&h, "alpha", "%1");
+        let reply = post_json(&h, "/api/sessions/wake", json!({"name": "alpha"})).await;
+        assert_eq!(
+            (reply.status, error_code(&reply).as_str()),
+            (StatusCode::CONFLICT, "pane_busy")
+        );
+        assert_eq!(reply.json()["message"], "sleep is running in the pane");
+        *panes.lock().unwrap() = vec![fake_pane("%7", 100, "bash", None)];
+        h.state.snooze.rename_session("alpha", "alpha").unwrap();
+        // Same id gone, same window/pane position: found by position.
+        let reply = post_json(&h, "/api/sessions/wake", json!({"name": "alpha"})).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(tmux.sent.lock().unwrap().len(), 2);
+
+        remember(&h, "gone", "%1");
+        let reply = post_json(&h, "/api/sessions/wake", json!({"name": "gone"})).await;
+        assert_eq!(
+            (reply.status, error_code(&reply).as_str()),
+            (StatusCode::NOT_FOUND, "not_found")
+        );
+        let (h, _, panes) = snooze_harness(vec![fake_pane("%1", 100, "bash", None)]);
+        remember(&h, "alpha", "%1");
+        panes.lock().unwrap()[0].index = 5;
+        panes.lock().unwrap()[0].id = "%5".into();
+        let reply = post_json(&h, "/api/sessions/wake", json!({"name": "alpha"})).await;
+        assert_eq!(
+            (reply.status, error_code(&reply).as_str()),
+            (StatusCode::CONFLICT, "pane_missing")
+        );
+    }
+
+    #[tokio::test]
+    async fn killing_and_renaming_keep_the_snooze_store_in_step() {
+        let (h, _, _) = snooze_harness(vec![fake_pane("%1", 100, "bash", None)]);
+        remember(&h, "alpha", "%1");
+        let reply = post_json(
+            &h,
+            "/api/sessions/rename",
+            json!({"name": "alpha", "new_name": "gamma"}),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert!(h.state.snooze.entries_for("alpha").is_empty());
+        assert_eq!(h.state.snooze.entries_for("gamma").len(), 1);
+        // The faked scan still calls the session "alpha": gamma is simply not running Claude.
+        let reply = post_json(&h, "/api/sessions/kill", json!({"name": "gamma"})).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert!(h.state.snooze.entries_for("gamma").is_empty());
     }
 
     // ---- starting tmux ---------------------------------------------------------------------------

@@ -373,6 +373,8 @@ mod tests {
             kind: Some("interactive".to_string()),
             name: None,
             source: ClaudeIdSource::SessionsFile,
+            status: None,
+            config_dir: None,
         }
     }
 
@@ -1196,6 +1198,8 @@ mod tests {
                 kind: Some("interactive".to_string()),
                 name: Some("n".to_string()),
                 source: ClaudeIdSource::SessionsFile,
+                status: None,
+                config_dir: None,
             })
         );
 
@@ -1222,6 +1226,7 @@ mod tests {
             activity: 6,
             group: Some("g".to_string()),
             claude_panes: 0,
+            snoozed: 0,
         };
         let (_root, detector) = blind_detector();
         let rows = vec![WindowRow {

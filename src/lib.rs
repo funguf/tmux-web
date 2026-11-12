@@ -10,6 +10,7 @@ pub mod pty;
 pub mod security;
 pub mod server;
 pub mod snapshot;
+pub mod snooze;
 pub mod tmux;
 pub mod upload;
 pub mod util;

@@ -111,6 +111,19 @@ export class Api {
   }
 
   /**
+   * Stop the Claude Code processes of a session but remember their conversations
+   * (POST api/sessions/snooze). Resolves to {snoozed, freed_bytes}.
+   */
+  snoozeSession(name) {
+    return this.request('POST', 'api/sessions/snooze', { json: { name } });
+  }
+
+  /** Reopen the snoozed conversations with --resume (POST api/sessions/wake). Resolves to {woken}. */
+  wakeSession(name) {
+    return this.request('POST', 'api/sessions/wake', { json: { name } });
+  }
+
+  /**
    * Scroll the tmux history of a session (POST api/sessions/scroll): `lines` < 0 goes back
    * to earlier output, > 0 forward. Resolves to {in_mode, scroll_position}.
    */
