@@ -16,6 +16,7 @@ that runs Claude Code.
   path is pasted into the terminal. For images, Claude Code turns the pasted path into `[Image #1]`.
 - **Copy text.** Selecting copies (on by default), plus Ctrl+Shift+C, Ctrl+C while text is
   selected, and the right-click menu. tmux copy mode also reaches your clipboard (OSC 52).
+- **Phone-friendly.** An extra-keys bar (Esc, Tab, Ctrl, Alt, arrows…) and a layout that stays above the on-screen keyboard.
 - **Finger scrolling.** On a touch screen a vertical swipe on a panel scrolls the tmux history
   (tmux copy mode), without turning on tmux's `mouse` option; programs that track the mouse
   get the swipe as a wheel instead.

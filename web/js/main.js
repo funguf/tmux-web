@@ -7,6 +7,7 @@ import { ContextMenu } from './context-menu.js';
 import { EmptyState } from './empty-state.js';
 import { errorMessage } from './dom.js';
 import { EventsClient, BACKOFF_MS } from './events-client.js';
+import { ExtraKeys } from './extra-keys.js';
 import { dragHasFiles } from './file-upload.js';
 import { LayoutPersistence } from './layout-persistence.js';
 import { LinkTooltip } from './link-tooltip.js';
@@ -19,6 +20,7 @@ import { StatusStore } from './status-store.js';
 import { installTestHook } from './test-hook.js';
 import { toast } from './toast.js';
 import { TopBar } from './top-bar.js';
+import { startViewportFit } from './viewport-fit.js';
 import { Workspace } from './workspace.js';
 
 const SCHEMA_VERSION = 1;
@@ -62,6 +64,8 @@ services.killDialog = new KillDialog(services);
 services.picker = new SessionPicker(services);
 services.settings = new SettingsPopover(services);
 services.renameDialog = new RenameDialog(services);
+startViewportFit();
+services.extraKeys = new ExtraKeys(services);
 
 new TopBar(document.getElementById('top-bar'), services);
 const emptyState = new EmptyState(workspaceWrap, services);

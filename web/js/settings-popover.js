@@ -19,6 +19,13 @@ export class SettingsPopover {
     this.fontValue = el('span', { class: 'font-size-value', testid: 'font-size-value', 'aria-live': 'polite' });
     this.copyToggle = el('input', { type: 'checkbox', testid: 'copy-on-select-toggle' });
     this.webglToggle = el('input', { type: 'checkbox', testid: 'webgl-toggle' });
+    this.extraKeysSelect = el(
+      'select',
+      { testid: 'extra-keys-mode', 'aria-label': 'Extra keys' },
+      el('option', { value: 'auto', text: 'Auto (touch screens)' }),
+      el('option', { value: 'on', text: 'Always' }),
+      el('option', { value: 'off', text: 'Never' }),
+    );
 
     this.popover.element.append(
       el('div', { class: 'setting-title', text: 'Settings' }),
@@ -40,6 +47,12 @@ export class SettingsPopover {
         el('span', { class: 'setting-label', text: 'GPU rendering' }),
         this.webglToggle,
       ),
+      el(
+        'label',
+        { class: 'setting-row', title: 'The Esc / Tab / Ctrl / arrows bar for phones (this device only)' },
+        el('span', { class: 'setting-label', text: 'Extra keys' }),
+        this.extraKeysSelect,
+      ),
     );
 
     const prefs = () => this.services.persistence.prefs;
@@ -47,6 +60,7 @@ export class SettingsPopover {
     this.fontUp.addEventListener('click', () => this.services.persistence.setPref('fontSize', prefs().fontSize + 1));
     this.copyToggle.addEventListener('change', () => this.services.persistence.setPref('copyOnSelect', this.copyToggle.checked));
     this.webglToggle.addEventListener('change', () => this.services.persistence.setPref('webgl', this.webglToggle.checked));
+    this.extraKeysSelect.addEventListener('change', () => this.services.extraKeys?.setMode(this.extraKeysSelect.value));
     this.services.persistence.on('prefs', () => this.#sync());
     // Escape / outside click: hand the keyboard back to the terminal.
     this.popover.on('close', () => this.services.workspace.focusActive());
@@ -77,5 +91,6 @@ export class SettingsPopover {
     this.fontUp.disabled = fontSize >= FONT_SIZE_MAX;
     this.copyToggle.checked = copyOnSelect;
     this.webglToggle.checked = webgl;
+    this.extraKeysSelect.value = this.services.extraKeys?.mode ?? 'auto';
   }
 }

@@ -588,6 +588,22 @@ Required behaviour:
     desktop wheel and tmux history is left alone. At most one `POST /api/sessions/scroll` per panel is in flight; rows that
     accumulate meanwhile are sent when it returns; failures are ignored without a toast. Taps,
     multi-touch, the desktop wheel and mouse are untouched, and the tmux `mouse` option stays off.
+16b. **Extra keys bar** (`extra-keys.js`, `viewport-fit.js`): `div.extra-keys`
+    (`data-testid="extra-keys"`, `role="toolbar"`) is the last child of `#app`, in flow below
+    `#workspace-wrap`. Buttons (`extra-key-<id>`, `data-key=<id>`): esc, tab, ctrl, alt, left, down,
+    up, right, pipe, slash, dash, tilde, ctrlc; the row scrolls horizontally. Buttons never take focus
+    (`pointerdown` is `preventDefault`ed) and act on `click` by calling `term.input(data, true)` on
+    the active panel's terminal, so bytes take the normal `term.onData` path; arrows use `ESC O x`
+    in application-cursor mode. Ctrl/Alt are sticky: one tap arms the next key (`is-armed`,
+    `aria-pressed`), a second tap within 350 ms locks (`is-locked`), a later tap clears. Typed
+    single characters pass through `ExtraKeys.transform()` (Ctrl: control codes; Alt: `ESC` prefix);
+    bar arrows with modifiers send `ESC [ 1 ; 5|3|7 x`, Alt+Tab `ESC Tab`. Visibility is the
+    per-device `localStorage` key `tmux-web.extraKeys` = `auto` (default, shown when
+    `(pointer: coarse)` matches) | `on` | `off`, set from the settings popover
+    (`extra-keys-mode` select); hidden = `hidden` attribute. When `window.visualViewport` exists,
+    `#app` is `position: fixed` sized by `--app-height` / `--app-top` (visual viewport height and
+    offsetTop, updated on its resize/scroll), so the bar stays above the iOS keyboard and the
+    terminals refit through their ResizeObservers.
 17. **Toasts**: `data-testid="toast"`, auto-dismiss after 4 s.
 
 ## 9. Tests

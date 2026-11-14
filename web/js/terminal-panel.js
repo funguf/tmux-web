@@ -371,7 +371,7 @@ export class TerminalPanel {
     this.disposables.push(
       { dispose: () => copyOnSelect.cancel() },
       { dispose: () => term.element?.removeEventListener('mouseup', copyAfterMouseSelection) },
-      term.onData((data) => this.conn.sendInput(encoder.encode(data))),
+      term.onData((data) => this.conn.sendInput(encoder.encode(this.services.extraKeys?.transform(data) ?? data))),
       term.onBinary((data) => this.conn.sendInput(binaryStringToBytes(data))),
       term.onResize(() => this.#syncSize()),
       term.onSelectionChange(() => copyOnSelect()),
